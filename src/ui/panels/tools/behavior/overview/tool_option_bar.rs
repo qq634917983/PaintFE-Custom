@@ -131,7 +131,7 @@ impl ToolsPanel {
     }
 
     fn show_move_options(&mut self, ui: &mut egui::Ui) {
-        ui.label("Filter:");
+        ui.label(t!("ctx.filter"));
         let current = self.move_interpolation;
         egui::ComboBox::from_id_salt("move_tool_filter")
             .selected_text(current.label())
@@ -141,12 +141,12 @@ impl ToolsPanel {
                     ui.selectable_value(&mut self.move_interpolation, *interp, interp.label());
                 }
             });
-        ui.checkbox(&mut self.move_anti_aliasing, "Anti-aliasing");
+        ui.checkbox(&mut self.move_anti_aliasing, t!("ctx.anti_alias"));
     }
 
     /// Show brush tip picker dropdown (grid popup with categories, matching shapes tool pattern)
     fn show_brush_tip_picker(&mut self, ui: &mut egui::Ui, assets: &Assets) {
-        ui.label("Tip:");
+        ui.label(t!("ctx.tip"));
 
         let popup_id = ui.make_persistent_id("brush_tip_grid_popup");
         let display_name = self.properties.brush_tip.display_name().to_string();
@@ -200,7 +200,7 @@ impl ToolsPanel {
             // "New..." button in top-right corner
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("New...").clicked() {
+                    if ui.button(t!("ctx.new")).clicked() {
                         self.pending_open_add_brush_tip = true;
                         ui.close();
                     }
@@ -208,7 +208,7 @@ impl ToolsPanel {
             });
 
             // "Basic" category header always first, with Circle as first item
-            ui.label(egui::RichText::new("Basic").strong().size(11.0));
+            ui.label(egui::RichText::new(t!("ctx.basic")).strong().size(11.0));
             egui::Grid::new("brush_tip_basic_grid")
                 .spacing(egui::Vec2::splat(2.0))
                 .show(ui, |ui| {
@@ -380,7 +380,7 @@ impl ToolsPanel {
                         let frame = egui::Frame::popup(ui.style());
                         frame.show(ui, |ui| {
                             ui.set_min_width(120.0);
-                            if ui.button("Delete").clicked() {
+                            if ui.button(t!("common.delete")).clicked() {
                                 self.pending_delete_brush_tip = Some(ctx_tip.clone());
                                 self.brush_tip_context_menu = None;
                                 ui.close();
@@ -669,7 +669,7 @@ impl ToolsPanel {
         if self.active_tool == Tool::Brush {
             ui.separator();
             ui.add_enabled_ui(false, |ui| {
-                ui.label("Mode:");
+                ui.label(t!("ctx.mode"));
                 let current_bm = self.properties.brush_mode;
                 egui::ComboBox::from_id_salt("ctx_brush_mode")
                     .selected_text(current_bm.label())
@@ -713,7 +713,7 @@ impl ToolsPanel {
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("Scatter");
+                    ui.label(t!("ctx.scatter"));
                     let mut scatter_pct = (self.properties.scatter * 200.0).round();
                     if ui
                         .add(
@@ -726,7 +726,7 @@ impl ToolsPanel {
                         self.properties.scatter = scatter_pct / 200.0;
                     }
                     ui.end_row();
-                    ui.label("Hue Jitter");
+                    ui.label(t!("ctx.hue_jitter"));
                     let mut hj_pct = (self.properties.hue_jitter * 100.0).round();
                     if ui
                         .add(
@@ -739,7 +739,7 @@ impl ToolsPanel {
                         self.properties.hue_jitter = hj_pct / 100.0;
                     }
                     ui.end_row();
-                    ui.label("Brightness");
+                    ui.label(t!("ctx.brightness"));
                     let mut bj_pct = (self.properties.brightness_jitter * 100.0).round();
                     if ui
                         .add(
@@ -758,7 +758,7 @@ impl ToolsPanel {
                     ui.separator();
                     ui.end_row();
 
-                    ui.label("Pen Pressure");
+                    ui.label(t!("ctx.pen_pressure"));
                     ui.label("");
                     ui.end_row();
 
@@ -1083,7 +1083,7 @@ impl ToolsPanel {
                 .num_columns(2)
                 .spacing([8.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("Scatter");
+                    ui.label(t!("ctx.scatter"));
                     let mut scatter_pct = (self.properties.scatter * 200.0).round();
                     if ui
                         .add(
@@ -1147,7 +1147,7 @@ impl ToolsPanel {
         if self.active_tool == Tool::RectangleSelect {
             ui.separator();
 
-            ui.label("Aspect ratio:");
+            ui.label(t!("ctx.aspect_ratio"));
             ui.add(
                 egui::TextEdit::singleline(&mut self.selection_state.aspect_ratio_input)
                     .desired_width(72.0)
@@ -1191,7 +1191,7 @@ impl ToolsPanel {
 
     /// Inline Feather / Expand / Contract controls for all selection tool context bars.
     fn show_sel_modify_controls(&mut self, ui: &mut egui::Ui) {
-        ui.label("Modify:");
+        ui.label(t!("ctx.modify"));
         ui.add(
             egui::DragValue::new(&mut self.sel_modify_radius)
                 .range(1.0..=200.0)
@@ -1312,7 +1312,7 @@ impl ToolsPanel {
         ui.separator();
 
         // Quality dropdown
-        ui.label("Quality:");
+        ui.label(t!("ctx.quality"));
         let cur_q = self.content_aware_state.quality;
         egui::ComboBox::from_id_salt("ca_quality")
             .selected_text(cur_q.label())
@@ -1340,7 +1340,7 @@ impl ToolsPanel {
 
         // Patch size (Balanced / HQ only)
         if cur_q.is_async() {
-            ui.label("Patch:");
+            ui.label(t!("ctx.patch"));
             ui.add(
                 egui::DragValue::new(&mut self.content_aware_state.patch_size)
                     .range(3_u32..=11_u32)
@@ -1357,7 +1357,7 @@ impl ToolsPanel {
         if cur_q == ContentAwareQuality::Instant {
             ui.label(t!("ctx.content_aware.hint"));
         } else {
-            ui.label("Paint to preview, then release to run inpaint.");
+            ui.label(t!("ctx.content_aware.paint_hint"));
         }
     }
 
@@ -1552,7 +1552,7 @@ impl ToolsPanel {
 
         ui.separator();
 
-        ui.label("Compare");
+        ui.label(t!("ctx.compare"));
         let prev_distance_mode = self.magic_wand_state.distance_mode;
         egui::ComboBox::from_id_salt("ctx_magic_wand_distance_mode")
             .selected_text(self.magic_wand_state.distance_mode.label())
@@ -1574,7 +1574,7 @@ impl ToolsPanel {
 
         ui.separator();
 
-        ui.label("Connectivity");
+        ui.label(t!("ctx.connectivity"));
         let prev_connectivity = self.magic_wand_state.connectivity;
         egui::ComboBox::from_id_salt("ctx_magic_wand_connectivity")
             .selected_text(self.magic_wand_state.connectivity.label())

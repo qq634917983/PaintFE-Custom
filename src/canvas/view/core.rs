@@ -1705,7 +1705,7 @@ impl Canvas {
             // Right-click context menu on the paste overlay.
             response.context_menu(|ui| {
                 // Interpolation filter selector.
-                ui.label("Filter:");
+                ui.label(t!("paste.filter"));
                 for interp in crate::ops::transform::Interpolation::all() {
                     if ui
                         .selectable_label(overlay.interpolation == *interp, interp.label())
@@ -1718,27 +1718,27 @@ impl Canvas {
                     }
                 }
                 ui.separator();
-                if ui.button("Reset Transform").clicked() {
+                if ui.button(t!("paste.reset_transform")).clicked() {
                     overlay.rotation = 0.0;
                     overlay.scale_x = 1.0;
                     overlay.scale_y = 1.0;
                     overlay.anchor_offset = Vec2::ZERO;
                     ui.close();
                 }
-                if ui.button("Center Anchor").clicked() {
+                if ui.button(t!("paste.center_anchor")).clicked() {
                     overlay.anchor_offset = Vec2::ZERO;
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("Commit (Enter)").clicked() {
+                if ui.button(t!("paste.commit")).clicked() {
                     paste_context_result = Some(PasteAction::Commit);
                     ui.close();
                 }
-                if ui.button("Commit & Select").clicked() {
+                if ui.button(t!("paste.commit_select")).clicked() {
                     paste_context_result = Some(PasteAction::CommitAndSelect);
                     ui.close();
                 }
-                if ui.button("Cancel (Esc)").clicked() {
+                if ui.button(t!("paste.cancel")).clicked() {
                     paste_context_result = Some(PasteAction::Cancel);
                     ui.close();
                 }

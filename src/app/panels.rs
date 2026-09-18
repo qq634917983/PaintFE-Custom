@@ -665,19 +665,19 @@ impl PaintFEApp {
 
         if let Some(inner_resp) = resp {
             inner_resp.response.context_menu(|ui| {
-                if ui.button("Save Palette").clicked() {
+                if ui.button(t!("palette.save")).clicked() {
                     self.palette_panel.save_palette_dialog();
                     ui.close();
                 }
-                if ui.button("Load Palette").clicked() {
+                if ui.button(t!("palette.load")).clicked() {
                     self.palette_panel.load_palette_dialog();
                     ui.close();
                 }
-                if ui.button("Reset Palette").clicked() {
+                if ui.button(t!("palette.reset")).clicked() {
                     self.palette_panel.reset_palette_default();
                     ui.close();
                 }
-                if ui.button("Reset Recents").clicked() {
+                if ui.button(t!("palette.reset_recents")).clicked() {
                     self.palette_panel.reset_recent_default();
                     ui.close();
                 }

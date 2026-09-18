@@ -518,19 +518,19 @@ impl LayersPanel {
                 let mut swap_layers: Option<(usize, usize)> = None;
 
                 total_response.context_menu(|ui| {
-                    if assets.menu_item(ui, Icon::LayerAdd, "Add Layer").clicked() {
+                    if assets.menu_item(ui, Icon::LayerAdd, &t!("layer.add_layer")).clicked() {
                         layer_to_add_top = true;
                         ui.close();
                     }
                     if assets
-                        .menu_item(ui, Icon::Rename, "Add Text Layer")
+                        .menu_item(ui, Icon::Rename, &t!("layer.add_text_layer"))
                         .clicked()
                     {
                         layer_to_add_text_top = true;
                         ui.close();
                     }
                     if assets
-                        .menu_item(ui, Icon::MenuColorExposure, "Add Adjustment Layer")
+                        .menu_item(ui, Icon::MenuColorExposure, &t!("layer.add_adjustment_layer"))
                         .clicked()
                     {
                         canvas_state.active_layer_index =
@@ -539,7 +539,7 @@ impl LayersPanel {
                         ui.close();
                     }
                     if assets
-                        .menu_item(ui, Icon::MenuFileOpen, "Add Folder")
+                        .menu_item(ui, Icon::MenuFileOpen, &t!("layer.add_folder"))
                         .clicked()
                     {
                         layer_to_add_folder_top = true;
@@ -1183,28 +1183,28 @@ impl LayersPanel {
             action = Some(FolderAction::StartRename(folder_id));
         }
         response.context_menu(|ui| {
-            if assets.menu_item(ui, Icon::LayerAdd, "Add Layer").clicked() {
+            if assets.menu_item(ui, Icon::LayerAdd, &t!("layer.add_layer")).clicked() {
                 action = Some(FolderAction::AddLayer(folder_id));
                 ui.close();
             }
             if assets
-                .menu_item(ui, Icon::Rename, "Add Text Layer")
+                .menu_item(ui, Icon::Rename, &t!("layer.add_text_layer"))
                 .clicked()
             {
                 action = Some(FolderAction::AddTextLayer(folder_id));
                 ui.close();
             }
             if assets
-                .menu_item(ui, Icon::MenuFileOpen, "Add Folder Above")
+                .menu_item(ui, Icon::MenuFileOpen, &t!("layer.add_folder_above"))
                 .clicked()
             {
                 action = Some(FolderAction::AddFolderAbove(folder_id));
                 ui.close();
             }
             ui.separator();
-            ui.label(egui::RichText::new("Folder color").strong());
+            ui.label(egui::RichText::new(t!("layer.folder_color")).strong());
             ui.horizontal_wrapped(|ui| {
-                if ui.small_button("None").clicked() {
+                if ui.small_button(t!("common.none")).clicked() {
                     action = Some(FolderAction::SetColor(folder_id, None));
                     ui.close();
                 }
@@ -1227,19 +1227,24 @@ impl LayersPanel {
             });
             ui.separator();
             if assets
-                .menu_item(ui, Icon::Layers, "Select Contents")
+                .menu_item(ui, Icon::Layers, &t!("layer.select_contents"))
                 .clicked()
             {
                 action = Some(FolderAction::SelectContents(folder_id));
                 ui.close();
             }
             if assets
-                .menu_item(ui, Icon::Rename, "Rename Folder")
+                .menu_item(ui, Icon::Rename, &t!("layer.rename_folder"))
                 .clicked()
             {
                 action = Some(FolderAction::StartRename(folder_id));
                 ui.close();
             }
+            let folder_visibility_label = if folder.visible {
+                t!("layer.hide_folder")
+            } else {
+                t!("layer.show_folder")
+            };
             if assets
                 .menu_item(
                     ui,
@@ -1248,26 +1253,23 @@ impl LayersPanel {
                     } else {
                         Icon::Visible
                     },
-                    if folder.visible {
-                        "Hide Folder"
-                    } else {
-                        "Show Folder"
-                    },
+                    &folder_visibility_label,
                 )
                 .clicked()
             {
                 action = Some(FolderAction::ToggleVisibility(folder_id));
                 ui.close();
             }
+            let folder_collapse_label = if folder.collapsed {
+                t!("common.expand")
+            } else {
+                t!("common.collapse")
+            };
             if assets
                 .menu_item(
                     ui,
                     Icon::MoveDown,
-                    if folder.collapsed {
-                        "Expand"
-                    } else {
-                        "Collapse"
-                    },
+                    &folder_collapse_label,
                 )
                 .clicked()
             {
@@ -1276,7 +1278,7 @@ impl LayersPanel {
             }
             ui.separator();
             if assets
-                .menu_item(ui, Icon::LayerDelete, "Delete Folder")
+                .menu_item(ui, Icon::LayerDelete, &t!("layer.delete_folder"))
                 .clicked()
             {
                 action = Some(FolderAction::Delete(folder_id));
@@ -1617,7 +1619,7 @@ impl LayersPanel {
                 ui.close();
             }
             if assets
-                .menu_item(ui, Icon::MenuColorExposure, "Add Adjustment Layer")
+                .menu_item(ui, Icon::MenuColorExposure, &t!("layer.add_adjustment_layer"))
                 .clicked()
             {
                 context_action = Some(ContextAction::AddAdjustment);
@@ -1625,7 +1627,7 @@ impl LayersPanel {
             }
             if canvas_state.layers[layer_idx].folder_id.is_none()
                 && assets
-                    .menu_item(ui, Icon::MenuFileOpen, "Add Folder")
+                    .menu_item(ui, Icon::MenuFileOpen, &t!("layer.add_folder"))
                     .clicked()
             {
                 context_action = Some(ContextAction::AddFolder);
@@ -1649,7 +1651,7 @@ impl LayersPanel {
             ui.separator();
             if !canvas_state.layer_folders.is_empty() {
                 ui.menu_button(
-                    format!("{} Move to Folder", Icon::MenuFileOpen.emoji()),
+                    format!("{} {}", Icon::MenuFileOpen.emoji(), t!("layer.move_to_folder")),
                     |ui| {
                         for folder in &canvas_state.layer_folders {
                             if assets
@@ -1663,7 +1665,7 @@ impl LayersPanel {
                         if canvas_state.layers[layer_idx].folder_id.is_some() {
                             ui.separator();
                             if assets
-                                .menu_item(ui, Icon::MoveDown, "Remove from Folder")
+                                .menu_item(ui, Icon::MoveDown, &t!("layer.remove_from_folder"))
                                 .clicked()
                             {
                                 context_action = Some(ContextAction::RemoveFromFolder);
@@ -1675,16 +1677,16 @@ impl LayersPanel {
                 ui.separator();
             }
             ui.menu_button(
-                format!("{} Extract Channel", Icon::MenuColorLevels.emoji()),
+                format!("{} {}", Icon::MenuColorLevels.emoji(), t!("layer.extract_channel")),
                 |ui| {
                     for (label, icon, channel) in [
-                        ("Red", Icon::MenuColorCurves, ImageChannel::Red),
-                        ("Green", Icon::MenuColorHsl, ImageChannel::Green),
-                        ("Blue", Icon::MenuFilterColorFilter, ImageChannel::Blue),
-                        ("Alpha", Icon::MenuColorInvertAlpha, ImageChannel::Alpha),
-                        ("Luminance", Icon::MenuColorLevels, ImageChannel::Luminance),
+                        (t!("channel.red"), Icon::MenuColorCurves, ImageChannel::Red),
+                        (t!("channel.green"), Icon::MenuColorHsl, ImageChannel::Green),
+                        (t!("channel.blue"), Icon::MenuFilterColorFilter, ImageChannel::Blue),
+                        (t!("channel.alpha"), Icon::MenuColorInvertAlpha, ImageChannel::Alpha),
+                        (t!("channel.luminance"), Icon::MenuColorLevels, ImageChannel::Luminance),
                     ] {
-                        if assets.menu_item(ui, icon, label).clicked() {
+                        if assets.menu_item(ui, icon, &label).clicked() {
                             context_action = Some(ContextAction::ExtractChannel(channel));
                             ui.close();
                         }
@@ -1696,7 +1698,7 @@ impl LayersPanel {
                     .menu_item(
                         ui,
                         Icon::MergeDownAsMask,
-                        "Replace Alpha from Below Luminance",
+                        &t!("layer.replace_alpha_from_below_luminance"),
                     )
                     .clicked()
             {
@@ -1727,7 +1729,7 @@ impl LayersPanel {
                     .menu_item(
                         ui,
                         Icon::AddLayerMaskRevealAll,
-                        "Add Layer Mask (Reveal All)",
+                        &t!("layer.mask.add_reveal_all"),
                     )
                     .clicked()
             {
@@ -1739,41 +1741,43 @@ impl LayersPanel {
                     .menu_item(
                         ui,
                         Icon::AddLayerMaskFromSelection,
-                        "Add Layer Mask (From Selection)",
+                        &t!("layer.mask.add_from_selection"),
                     )
                     .clicked()
             {
                 context_action = Some(ContextAction::AddLayerMaskFromSelection);
                 ui.close();
             }
+            let mask_edit_label = if canvas_state.edit_layer_mask
+                && canvas_state.active_layer_index == layer_idx
+            {
+                t!("layer.mask.edit_pixels")
+            } else {
+                t!("layer.mask.edit_mask")
+            };
             if has_mask
                 && assets
                     .menu_item(
                         ui,
                         Icon::LayerProperties,
-                        if canvas_state.edit_layer_mask
-                            && canvas_state.active_layer_index == layer_idx
-                        {
-                            "Edit Layer Pixels"
-                        } else {
-                            "Edit Layer Mask"
-                        },
+                        &mask_edit_label,
                     )
                     .clicked()
             {
                 context_action = Some(ContextAction::ToggleLayerMaskEdit);
                 ui.close();
             }
+            let mask_enabled_label = if canvas_state.layers[layer_idx].mask_enabled {
+                t!("layer.mask.disable")
+            } else {
+                t!("layer.mask.enable")
+            };
             if has_mask
                 && assets
                     .menu_item(
                         ui,
                         Icon::ToggleLayerMask,
-                        if canvas_state.layers[layer_idx].mask_enabled {
-                            "Disable Layer Mask"
-                        } else {
-                            "Enable Layer Mask"
-                        },
+                        &mask_enabled_label,
                     )
                     .clicked()
             {
@@ -1782,7 +1786,7 @@ impl LayersPanel {
             }
             if has_mask
                 && assets
-                    .menu_item(ui, Icon::InvertLayerMask, "Invert Layer Mask")
+                    .menu_item(ui, Icon::InvertLayerMask, &t!("layer.mask.invert"))
                     .clicked()
             {
                 context_action = Some(ContextAction::InvertLayerMask);
@@ -1790,7 +1794,7 @@ impl LayersPanel {
             }
             if has_mask
                 && assets
-                    .menu_item(ui, Icon::ApplyLayerMask, "Apply Layer Mask")
+                    .menu_item(ui, Icon::ApplyLayerMask, &t!("layer.mask.apply"))
                     .clicked()
             {
                 context_action = Some(ContextAction::ApplyLayerMask);
@@ -1798,7 +1802,7 @@ impl LayersPanel {
             }
             if has_mask
                 && assets
-                    .menu_item(ui, Icon::DeleteLayerMask, "Delete Layer Mask")
+                    .menu_item(ui, Icon::DeleteLayerMask, &t!("layer.mask.delete"))
                     .clicked()
             {
                 context_action = Some(ContextAction::DeleteLayerMask);

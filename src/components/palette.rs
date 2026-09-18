@@ -125,7 +125,7 @@ impl PalettePanel {
         let spacing = -1.0;
 
         if self.palette.is_empty() {
-            ui.label(egui::RichText::new("(empty)").small().weak());
+            ui.label(egui::RichText::new(t!("palette.empty")).small().weak());
             return;
         }
 
@@ -162,12 +162,12 @@ impl PalettePanel {
             }
 
             response.context_menu(|ui| {
-                if ui.button("Save Primary to Slot").clicked() {
+                if ui.button(t!("palette.save_primary")).clicked() {
                     *swatch = primary_color;
                     self.selected_index = i;
                     ui.close();
                 }
-                if ui.button("Save Secondary to Slot").clicked() {
+                if ui.button(t!("palette.save_secondary")).clicked() {
                     *swatch = secondary_color;
                     self.selected_index = i;
                     ui.close();
@@ -255,7 +255,7 @@ fn draw_recent_grid(
 ) {
     let count = colors.len().min(max_count);
     if count == 0 {
-        ui.label(egui::RichText::new("(empty)").small().weak());
+        ui.label(egui::RichText::new(t!("palette.empty")).small().weak());
         return;
     }
 

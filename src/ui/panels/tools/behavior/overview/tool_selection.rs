@@ -51,7 +51,12 @@ impl ToolsPanel {
 
     /// Get the name of the active tool for display in context bar
     pub fn active_tool_name(&self) -> String {
-        match self.active_tool {
+        Self::tool_name_for(self.active_tool)
+    }
+
+    /// Localized display name used consistently by the toolbar and context bar.
+    pub fn tool_name_for(tool: Tool) -> String {
+        match tool {
             Tool::Brush => t!("tool.brush"),
             Tool::Eraser => t!("tool.eraser"),
             Tool::Pencil => t!("tool.pencil"),
@@ -68,7 +73,7 @@ impl ToolsPanel {
             Tool::Liquify => t!("tool.liquify"),
             Tool::MeshWarp => t!("tool.mesh_warp"),
             Tool::ColorRemover => t!("tool.color_remover"),
-            Tool::Smudge => "Smudge".to_string(),
+            Tool::Smudge => t!("tool.smudge"),
             Tool::CloneStamp => t!("tool.clone_stamp"),
             Tool::Text => t!("tool.text"),
             Tool::PerspectiveCrop => t!("tool.perspective_crop"),
@@ -82,30 +87,30 @@ impl ToolsPanel {
     /// Short usage hint for a given tool ÔÇö displayed at bottom-left of the app on hover.
     pub fn tool_hint_for(tool: Tool) -> String {
         match tool {
-            Tool::Brush => "Left-click to paint. Right-click for secondary color. Hold Shift for straight lines.".into(),
-            Tool::Pencil => "Left-click to draw 1px aliased lines. Hold Shift for straight lines.".into(),
-            Tool::Eraser => "Left-click to erase. Removes pixels from the active layer.".into(),
-            Tool::Line => "Click and drag to draw a straight line. Adjust width in options.".into(),
-            Tool::RectangleSelect => "Click and drag to create a rectangular selection.".into(),
-            Tool::EllipseSelect => "Click and drag to create an elliptical selection.".into(),
-            Tool::MovePixels => "Click + drag to move selected pixels. No selection = move entire layer.".into(),
-            Tool::MoveSelection => "Click + drag to move the selection boundary without affecting pixels.".into(),
-            Tool::MagicWand => "Click to select contiguous areas of similar color. Adjust tolerance in options.".into(),
-            Tool::Fill => "Click to flood-fill an area with the primary color.".into(),
-            Tool::ColorPicker => "Left-click to pick primary color. Right-click for secondary color.".into(),
-            Tool::Gradient => "Click and drag to draw a gradient on the active layer.".into(),
-            Tool::Lasso => "Click to place points, or drag freehand, to create an irregular selection.".into(),
-            Tool::Zoom => "Click to zoom in. Drag a rectangle to zoom to area. Hold Alt to zoom out.".into(),
-            Tool::Pan => "Click and drag to pan the canvas viewport.".into(),
-            Tool::CloneStamp => "Ctrl+click to set source. Then paint to clone from source area.".into(),
-            Tool::ContentAwareBrush => "Paint over an area to remove it using content-aware fill.".into(),
-            Tool::Liquify => "Click and drag to push/warp pixels in the brush direction.".into(),
-            Tool::MeshWarp => "Drag control points to warp the image with a smooth mesh grid.".into(),
-            Tool::ColorRemover => "Paint over a color to remove it, making those pixels transparent.".into(),
-            Tool::Smudge => "Click and drag to smudge/blend colors in the stroke direction.".into(),
-            Tool::Text => "Click to place text. Configure font, size, and color in options.".into(),
-            Tool::PerspectiveCrop => "Drag the four corners to define a perspective crop region.".into(),
-            Tool::Shapes => "Click and drag to draw shapes. Hold Shift for constrained proportions.".into(),
+            Tool::Brush => t!("tool.hint.brush"),
+            Tool::Pencil => t!("tool.hint.pencil"),
+            Tool::Eraser => t!("tool.hint.eraser"),
+            Tool::Line => t!("tool.hint.line"),
+            Tool::RectangleSelect => t!("tool.hint.rectangle_select"),
+            Tool::EllipseSelect => t!("tool.hint.ellipse_select"),
+            Tool::MovePixels => t!("tool.hint.move_pixels"),
+            Tool::MoveSelection => t!("tool.hint.move_selection"),
+            Tool::MagicWand => t!("tool.hint.magic_wand"),
+            Tool::Fill => t!("tool.hint.fill"),
+            Tool::ColorPicker => t!("tool.hint.color_picker"),
+            Tool::Gradient => t!("tool.hint.gradient"),
+            Tool::Lasso => t!("tool.hint.lasso"),
+            Tool::Zoom => t!("tool.hint.zoom"),
+            Tool::Pan => t!("tool.hint.pan"),
+            Tool::CloneStamp => t!("tool.hint.clone_stamp"),
+            Tool::ContentAwareBrush => t!("tool.hint.content_aware"),
+            Tool::Liquify => t!("tool.hint.liquify"),
+            Tool::MeshWarp => t!("tool.hint.mesh_warp"),
+            Tool::ColorRemover => t!("tool.hint.color_remover"),
+            Tool::Smudge => t!("tool.hint.smudge"),
+            Tool::Text => t!("tool.hint.text"),
+            Tool::PerspectiveCrop => t!("tool.hint.perspective_crop"),
+            Tool::Shapes => t!("tool.hint.shapes"),
         }
     }
 }

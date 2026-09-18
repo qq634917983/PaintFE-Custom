@@ -1983,11 +1983,11 @@ impl PasteOverlay {
     /// Cancel was clicked.
     pub fn context_menu(&mut self, ui: &mut egui::Ui) -> Option<bool> {
         let mut result = None;
-        ui.menu_button("Paste Options", |ui| {
-            ui.label("Hold Shift while moving to snap to edges and centre.");
+        ui.menu_button(t!("paste.options"), |ui| {
+            ui.label(t!("paste.snap_hint"));
             ui.separator();
             // Interpolation selector
-            ui.label("Filter:");
+            ui.label(t!("paste.filter"));
             for interp in Interpolation::all() {
                 if ui
                     .selectable_label(self.interpolation == *interp, interp.label())
@@ -1999,24 +1999,24 @@ impl PasteOverlay {
             ui.separator();
 
             // Reset transforms
-            if ui.button("Reset Position").clicked() {
+            if ui.button(t!("paste.reset_position")).clicked() {
                 self.rotation = 0.0;
                 self.scale_x = 1.0;
                 self.scale_y = 1.0;
                 self.anchor_offset = Vec2::ZERO;
                 ui.close();
             }
-            if ui.button("Center Anchor").clicked() {
+            if ui.button(t!("paste.center_anchor")).clicked() {
                 self.anchor_offset = Vec2::ZERO;
                 ui.close();
             }
 
             ui.separator();
-            if ui.button("✓ Commit (Enter)").clicked() {
+            if ui.button(format!("✓ {}", t!("paste.commit"))).clicked() {
                 result = Some(true);
                 ui.close();
             }
-            if ui.button("✗ Cancel (Esc)").clicked() {
+            if ui.button(format!("✗ {}", t!("paste.cancel"))).clicked() {
                 result = Some(false);
                 ui.close();
             }

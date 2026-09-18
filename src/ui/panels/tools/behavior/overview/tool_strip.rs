@@ -62,9 +62,15 @@ impl ToolsPanel {
                             };
                             let response = ui.add_sized(size, button);
                             let hovered = response.hovered() && !disabled;
+                            let mut tooltip = Self::tool_name_for(tool);
+                            if let Some(action) = icon.bindable_action()
+                                && let Some(combo) = keybindings.get(action)
+                            {
+                                tooltip = format!("{} ({})", tooltip, combo.display());
+                            }
                             if !disabled
                                 && response
-                                    .on_hover_text(icon.tooltip_with_keybind(keybindings))
+                                    .on_hover_text(tooltip)
                                     .clicked()
                             {
                                 self.change_tool(tool);

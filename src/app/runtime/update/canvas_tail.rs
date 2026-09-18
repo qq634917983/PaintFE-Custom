@@ -58,7 +58,7 @@ impl PaintFEApp {
                                     .range(-180.0..=180.0)
                                     .suffix("°"),
                             );
-                            ui.label("Interpolation:");
+                            ui.label(t!("ctx.interpolation"));
                             egui::ComboBox::from_id_salt("straighten_interpolation")
                                 .selected_text(session.interpolation.label())
                                 .width(100.0)
@@ -70,16 +70,16 @@ impl PaintFEApp {
                                         ui.selectable_value(&mut session.interpolation, interpolation, interpolation.label());
                                     }
                                 });
-                            if ui.button("Reset").clicked() { session.angle_degrees = 0.0; }
-                            if ui.button("Apply").clicked() { commit_straighten = true; }
-                            if ui.button("Cancel").clicked() { cancel_straighten = true; }
+                            if ui.button(t!("common.reset")).clicked() { session.angle_degrees = 0.0; }
+                            if ui.button(t!("common.apply")).clicked() { commit_straighten = true; }
+                            if ui.button(t!("common.cancel")).clicked() { cancel_straighten = true; }
                         } else if let Some(ref mut overlay) = self.paste_overlay {
                             // --- Paste overlay context bar ---
-                            crate::signal_widgets::tool_shelf_tag(ui, "PASTE", self.theme.accent, &self.theme);
+                            crate::signal_widgets::tool_shelf_tag(ui, &t!("paste.title"), self.theme.accent, &self.theme);
                             ui.add_space(6.0);
 
                             // Filter mode
-                            ui.label("Filter:");
+                            ui.label(t!("paste.filter"));
                             let current_interp = overlay.interpolation;
                             egui::ComboBox::from_id_salt("ctx_paste_filter")
                                 .selected_text(current_interp.label())
@@ -103,7 +103,7 @@ impl PaintFEApp {
 
                             // Anti-aliasing toggle
                             if ui
-                                .checkbox(&mut overlay.anti_aliasing, "Anti-aliasing")
+                                .checkbox(&mut overlay.anti_aliasing, t!("ctx.anti_alias"))
                                 .changed()
                             {
                                 self.tools_panel.move_anti_aliasing = overlay.anti_aliasing;
@@ -127,8 +127,8 @@ impl PaintFEApp {
 
                             // Quick actions
                             if ui
-                                .button("Reset")
-                                .on_hover_text("Reset all transforms")
+                                .button(t!("common.reset"))
+                                .on_hover_text(t!("paste.reset_all_transforms"))
                                 .clicked()
                             {
                                 overlay.rotation = 0.0;
