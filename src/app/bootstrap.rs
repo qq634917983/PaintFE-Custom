@@ -711,13 +711,15 @@ impl PaintFEApp {
                     && center.x + image_w * 0.5 <= cw as f32
                     && center.y + image_h * 0.5 <= ch as f32
             });
-            // A full-canvas clipboard image belongs at (0, 0). Otherwise put a
-            // paste under the cursor when possible, falling back to the former
-            // source location only when it is fully visible in this document.
-            let placement = if same_size {
+            // In-app copy/paste is always in-place: preserve the source center
+            // even when the mouse is elsewhere. External images have no source
+            // coordinates, so they still use the cursor or canvas center.
+            let placement = if request.use_source_center {
+                source_center.unwrap_or(canvas_center)
+            } else if same_size {
                 canvas_center
             } else {
-                cursor_center.or(source_center).unwrap_or(canvas_center)
+                cursor_center.unwrap_or(canvas_center)
             };
             let mut overlay = if request.use_source_center || cursor_center.is_some() {
                 let center = placement;
@@ -738,8 +740,13 @@ impl PaintFEApp {
             self.paste_overlay = Some(overlay);
             self.paste_transform_undo.clear();
             self.paste_transform_redo.clear();
-            self.canvas.open_paste_menu = true;
+            self.canvas.open_paste_menu = false;
         }
+
+        // A normal paste is final immediately: commit creates a transparent
+        // layer above the active layer and writes the clipboard image there.
+        // Move Pixels uses a separate path and is unaffected by this behavior.
+        self.commit_paste_overlay();
     }
 
     fn tool_to_key(tool: tools::Tool) -> &'static str {
