@@ -1,0 +1,1866 @@
+use eframe::egui;
+use egui::{Color32, ColorImage, TextureHandle, TextureOptions};
+use image::ImageEncoder;
+use image::codecs::bmp::BmpEncoder;
+use image::codecs::jpeg::JpegEncoder;
+use image::codecs::png::PngEncoder;
+use image::codecs::tiff::TiffEncoder;
+use image::imageops::FilterType;
+use image::{DynamicImage, RgbaImage};
+use std::io::Cursor;
+use std::path::PathBuf;
+use std::sync::mpsc;
+
+// ============================================================================
+// UNITS ENUM
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum SizeUnit {
+    #[default]
+    Pixels,
+    Inches,
+    Centimeters,
+}
+
+impl SizeUnit {
+    pub fn label(&self) -> String {
+        match self {
+            SizeUnit::Pixels => t!("unit.px_suffix"),
+            SizeUnit::Inches => t!("unit.in_suffix"),
+            SizeUnit::Centimeters => t!("unit.cm_suffix"),
+        }
+    }
+}
+
+// ============================================================================
+// SIZE PRESETS
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum SizePreset {
+    #[default]
+    Custom,
+    Size800x600,
+    Size1280x720,
+    Size1920x1080,
+    Size2560x1440,
+    Size4K,
+    A4At300Ppi,
+    A4At72Ppi,
+    LetterAt300Ppi,
+}
+
+impl SizePreset {
+    pub fn label(&self) -> String {
+        match self {
+            SizePreset::Custom => t!("new_file_preset.custom"),
+            SizePreset::Size800x600 => t!("new_file_preset.800x600"),
+            SizePreset::Size1280x720 => t!("new_file_preset.1280x720"),
+            SizePreset::Size1920x1080 => t!("new_file_preset.1920x1080"),
+            SizePreset::Size2560x1440 => t!("new_file_preset.2560x1440"),
+            SizePreset::Size4K => t!("new_file_preset.4k"),
+            SizePreset::A4At300Ppi => t!("new_file_preset.a4_300ppi"),
+            SizePreset::A4At72Ppi => t!("new_file_preset.a4_72ppi"),
+            SizePreset::LetterAt300Ppi => t!("new_file_preset.letter_300ppi"),
+        }
+    }
+
+    /// Returns (width, height, ppi) for the preset
+    pub fn dimensions(&self) -> Option<(u32, u32, f32)> {
+        match self {
+            SizePreset::Custom => None,
+            SizePreset::Size800x600 => Some((800, 600, 72.0)),
+            SizePreset::Size1280x720 => Some((1280, 720, 72.0)),
+            SizePreset::Size1920x1080 => Some((1920, 1080, 72.0)),
+            SizePreset::Size2560x1440 => Some((2560, 1440, 72.0)),
+            SizePreset::Size4K => Some((3840, 2160, 72.0)),
+            // A4 is 210mm × 297mm = 8.27in × 11.69in
+            SizePreset::A4At300Ppi => Some((2480, 3508, 300.0)),
+            SizePreset::A4At72Ppi => Some((595, 842, 72.0)),
+            // US Letter is 8.5in × 11in
+            SizePreset::LetterAt300Ppi => Some((2550, 3300, 300.0)),
+        }
+    }
+
+    fn all() -> &'static [SizePreset] {
+        &[
+            SizePreset::Custom,
+            SizePreset::Size800x600,
+            SizePreset::Size1280x720,
+            SizePreset::Size1920x1080,
+            SizePreset::Size2560x1440,
+            SizePreset::Size4K,
+            SizePreset::A4At300Ppi,
+            SizePreset::A4At72Ppi,
+            SizePreset::LetterAt300Ppi,
+        ]
+    }
+}
+
+// ============================================================================
+// NEW FILE DIALOG
+// ============================================================================
+
+pub struct NewFileDialog {
+    pub open: bool,
+    width: f32,
+    height: f32,
+    width_input: String,
+    height_input: String,
+    unit: SizeUnit,
+    ppi: f32,
+    lock_aspect_ratio: bool,
+    aspect_ratio: f32,
+    preset: SizePreset,
+    focus_width_on_open: bool,
+    replace_width_on_first_edit: bool,
+    focused_dimension_input: Option<DimensionInput>,
+    prev_ctrl_a_down: bool,
+    clipboard_dims_rx: Option<mpsc::Receiver<Option<(u32, u32)>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DimensionInput {
+    Width,
+    Height,
+}
+
+impl Default for NewFileDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            width: 800.0,
+            height: 600.0,
+            width_input: "800".to_string(),
+            height_input: "600".to_string(),
+            unit: SizeUnit::Pixels,
+            ppi: 72.0,
+            lock_aspect_ratio: true,
+            aspect_ratio: 800.0 / 600.0,
+            preset: SizePreset::Size800x600,
+            focus_width_on_open: false,
+            replace_width_on_first_edit: false,
+            focused_dimension_input: None,
+            prev_ctrl_a_down: false,
+            clipboard_dims_rx: None,
+        }
+    }
+}
+
+impl NewFileDialog {
+    pub fn set_lock_aspect_ratio(&mut self, lock: bool) {
+        self.lock_aspect_ratio = lock;
+        if lock {
+            self.aspect_ratio = self.width / self.height.max(1.0);
+        }
+    }
+
+    pub fn lock_aspect_ratio(&self) -> bool {
+        self.lock_aspect_ratio
+    }
+
+    pub fn open_dialog(&mut self) {
+        self.sync_inputs_from_values();
+        self.open = true;
+        self.focus_width_on_open = true;
+        self.replace_width_on_first_edit = true;
+        self.focused_dimension_input = Some(DimensionInput::Width);
+        self.prev_ctrl_a_down = false;
+    }
+
+    /// Pre-populate width and height from a clipboard image if available.
+    /// Called when the dialog opens so newly-created canvases match the
+    /// clipboard image dimensions by default.
+    pub fn load_clipboard_dimensions(&mut self) {
+        // Fast path: in-app clipboard dimensions are available immediately.
+        if let Some((w, h)) = crate::ops::clipboard::get_internal_clipboard_image_dimensions() {
+            self.width = w as f32;
+            self.height = h as f32;
+            self.aspect_ratio = self.width / self.height.max(1.0);
+            self.preset = SizePreset::Custom;
+            self.unit = SizeUnit::Pixels;
+            self.sync_inputs_from_values();
+        }
+
+        // Slow path: probe system clipboard on a background thread so opening the
+        // dialog remains instant even when clipboard providers are sluggish.
+        // Not available on web (no threads) — the system clipboard isn't
+        // reachable from wasm anyway, so this is skipped entirely there.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (tx, rx) = mpsc::channel();
+            self.clipboard_dims_rx = Some(rx);
+            std::thread::spawn(move || {
+                let dims = crate::ops::clipboard::get_clipboard_image_dimensions();
+                let _ = tx.send(dims);
+            });
+        }
+    }
+
+    fn sync_inputs_from_values(&mut self) {
+        self.width_input = format_dimension_value(self.width);
+        self.height_input = format_dimension_value(self.height);
+    }
+
+    fn preview_values(&self) -> (f32, f32) {
+        let width = evaluate_dimension_expression(&self.width_input).unwrap_or(self.width);
+        let height = evaluate_dimension_expression(&self.height_input).unwrap_or(self.height);
+        (width.max(1.0), height.max(1.0))
+    }
+
+    fn preview_pixels(&self) -> (u32, u32) {
+        let (width, height) = self.preview_values();
+        let (w, h) = match self.unit {
+            SizeUnit::Pixels => (width, height),
+            SizeUnit::Inches => (width * self.ppi, height * self.ppi),
+            SizeUnit::Centimeters => {
+                let inches_w = width / 2.54;
+                let inches_h = height / 2.54;
+                (inches_w * self.ppi, inches_h * self.ppi)
+            }
+        };
+        (w.round().max(1.0) as u32, h.round().max(1.0) as u32)
+    }
+
+    fn commit_width_input(&mut self) {
+        let old_width = self.width;
+        if let Some(new_width) = evaluate_dimension_expression(&self.width_input) {
+            let new_width = new_width.round().clamp(1.0, 20000.0);
+            self.width = new_width;
+            self.width_input = format_dimension_value(self.width);
+            self.preset = SizePreset::Custom;
+            if self.lock_aspect_ratio && old_width > 0.0 {
+                self.height = (self.width / self.aspect_ratio).round().clamp(1.0, 20000.0);
+                self.height_input = format_dimension_value(self.height);
+            } else {
+                self.aspect_ratio = self.width / self.height.max(1.0);
+            }
+        } else {
+            self.width_input = format_dimension_value(self.width);
+        }
+    }
+
+    fn commit_height_input(&mut self) {
+        let old_height = self.height;
+        if let Some(new_height) = evaluate_dimension_expression(&self.height_input) {
+            let new_height = new_height.round().clamp(1.0, 20000.0);
+            self.height = new_height;
+            self.height_input = format_dimension_value(self.height);
+            self.preset = SizePreset::Custom;
+            if self.lock_aspect_ratio && old_height > 0.0 {
+                self.width = (self.height * self.aspect_ratio)
+                    .round()
+                    .clamp(1.0, 20000.0);
+                self.width_input = format_dimension_value(self.width);
+            } else {
+                self.aspect_ratio = self.width / self.height.max(1.0);
+            }
+        } else {
+            self.height_input = format_dimension_value(self.height);
+        }
+    }
+
+    fn commit_inputs(&mut self) {
+        self.commit_width_input();
+        self.commit_height_input();
+    }
+
+    /// Convert current width/height from current unit to pixels
+    fn to_pixels(&self) -> (u32, u32) {
+        let (w, h) = match self.unit {
+            SizeUnit::Pixels => (self.width, self.height),
+            SizeUnit::Inches => (self.width * self.ppi, self.height * self.ppi),
+            SizeUnit::Centimeters => {
+                // 1 inch = 2.54 cm
+                let inches_w = self.width / 2.54;
+                let inches_h = self.height / 2.54;
+                (inches_w * self.ppi, inches_h * self.ppi)
+            }
+        };
+        (w.round().max(1.0) as u32, h.round().max(1.0) as u32)
+    }
+
+    /// Show the dialog and return Some((width, height)) if user clicks Create
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<(u32, u32)> {
+        use crate::ops::dialogs::{
+            DialogColors, accent_separator, contrast_text_color, paint_dialog_header, section_label,
+        };
+
+        let mut result = None;
+        let mut should_close = false;
+
+        if self.open {
+            if let Some(rx) = &self.clipboard_dims_rx {
+                match rx.try_recv() {
+                    Ok(Some((w, h))) => {
+                        self.width = w as f32;
+                        self.height = h as f32;
+                        self.aspect_ratio = self.width / self.height.max(1.0);
+                        self.preset = SizePreset::Custom;
+                        self.unit = SizeUnit::Pixels;
+                        self.sync_inputs_from_values();
+                        self.clipboard_dims_rx = None;
+                    }
+                    Ok(None) => {
+                        self.clipboard_dims_rx = None;
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.clipboard_dims_rx = None;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                }
+            }
+
+            // Keyboard: Enter = Create, Esc = Cancel
+            let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if enter {
+                self.commit_inputs();
+                result = Some(self.to_pixels());
+                should_close = true;
+            }
+            if esc {
+                should_close = true;
+            }
+
+            let select_all_requested = self.select_all_shortcut_pressed(ctx);
+
+            egui::Window::new("new_file_dialog_internal")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .movable(true)
+                .pivot(egui::Align2::CENTER_CENTER)
+                .default_pos(ctx.content_rect().center())
+                .show(ctx, |ui| {
+                    ui.set_min_width(360.0);
+
+                    let colors = DialogColors::from_ctx(ctx);
+                    if paint_dialog_header(ui, &colors, "\u{1F4C4}", &t!("dialog.new_file")) {
+                        should_close = true;
+                    }
+                    ui.add_space(6.0);
+
+                    // ── Preset row ──────────────────────────────────────────
+                    section_label(ui, &colors, &t!("common.preset"));
+                    egui::Grid::new("new_file_preset_grid")
+                        .num_columns(2)
+                        .min_col_width(80.0)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label(t!("common.preset"));
+                            egui::ComboBox::from_id_salt("preset_combo")
+                                .width(224.0)
+                                .selected_text(self.preset.label())
+                                .show_ui(ui, |ui| {
+                                    for preset in SizePreset::all() {
+                                        if ui
+                                            .selectable_value(
+                                                &mut self.preset,
+                                                *preset,
+                                                preset.label(),
+                                            )
+                                            .clicked()
+                                            && let Some((w, h, ppi)) = preset.dimensions()
+                                        {
+                                            self.width = w as f32;
+                                            self.height = h as f32;
+                                            self.ppi = ppi;
+                                            self.unit = SizeUnit::Pixels;
+                                            self.aspect_ratio = self.width / self.height;
+                                            self.sync_inputs_from_values();
+                                        }
+                                    }
+                                });
+                            ui.end_row();
+                        });
+
+                    // ── Dimensions grid ──────────────────────────────────────
+                    accent_separator(ui, &colors);
+                    section_label(ui, &colors, &t!("dialog.resize_image.dimensions"));
+
+                    egui::Grid::new("new_file_dims_grid")
+                        .num_columns(2)
+                        .min_col_width(80.0)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            // Width row
+                            ui.label(t!("common.width"));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let previous_input = self.width_input.clone();
+                                let mut width_output =
+                                    egui::TextEdit::singleline(&mut self.width_input)
+                                        .desired_width(96.0)
+                                        .show(ui);
+                                let width_response = &width_output.response;
+                                if width_response.has_focus()
+                                    || width_response.gained_focus()
+                                    || width_response.clicked()
+                                {
+                                    self.focused_dimension_input = Some(DimensionInput::Width);
+                                }
+                                Self::select_all_text_on_ctrl_a(
+                                    ctx,
+                                    width_response,
+                                    &mut width_output.state,
+                                    &self.width_input,
+                                    self.focused_dimension_input == Some(DimensionInput::Width),
+                                    select_all_requested,
+                                );
+                                if self.focus_width_on_open {
+                                    width_response.request_focus();
+                                    self.focused_dimension_input = Some(DimensionInput::Width);
+                                    self.focus_width_on_open = false;
+                                }
+                                if self.replace_width_on_first_edit && width_response.changed() {
+                                    if self.width_input.starts_with(&previous_input)
+                                        && self.width_input.len() > previous_input.len()
+                                    {
+                                        let suffix = &self.width_input[previous_input.len()..];
+                                        let suffix_trimmed = suffix.trim_start();
+                                        if !matches!(
+                                            suffix_trimmed.chars().next(),
+                                            Some('+') | Some('-') | Some('*') | Some('/')
+                                        ) {
+                                            self.width_input = suffix.to_string();
+                                        }
+                                    }
+                                    self.replace_width_on_first_edit = false;
+                                }
+                                let width_commit = width_response.lost_focus()
+                                    || (width_response.has_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Tab)));
+                                if width_commit {
+                                    self.commit_width_input();
+                                }
+                                ui.label(self.unit.label());
+                            });
+                            ui.end_row();
+
+                            // Height row
+                            ui.label(t!("common.height"));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+                                let mut height_output =
+                                    egui::TextEdit::singleline(&mut self.height_input)
+                                        .desired_width(96.0)
+                                        .show(ui);
+                                let height_response = &height_output.response;
+                                if height_response.has_focus()
+                                    || height_response.gained_focus()
+                                    || height_response.clicked()
+                                {
+                                    self.focused_dimension_input = Some(DimensionInput::Height);
+                                }
+                                Self::select_all_text_on_ctrl_a(
+                                    ctx,
+                                    height_response,
+                                    &mut height_output.state,
+                                    &self.height_input,
+                                    self.focused_dimension_input == Some(DimensionInput::Height),
+                                    select_all_requested,
+                                );
+                                let height_commit = height_response.lost_focus()
+                                    || (height_response.has_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Tab)));
+                                if height_commit {
+                                    self.commit_height_input();
+                                }
+                                ui.label(self.unit.label());
+                            });
+                            ui.end_row();
+
+                            // Lock aspect ratio (below Height)
+                            ui.label("");
+                            let checkbox_resp = ui.checkbox(
+                                &mut self.lock_aspect_ratio,
+                                t!("common.lock_aspect_ratio"),
+                            );
+                            if checkbox_resp.changed() && self.lock_aspect_ratio {
+                                self.aspect_ratio = self.width / self.height.max(1.0);
+                            }
+                            ui.end_row();
+                        });
+
+                    // ── Options (units / resolution) ─────────────────────────
+                    accent_separator(ui, &colors);
+                    section_label(ui, &colors, &t!("common.units"));
+
+                    egui::Grid::new("new_file_units_grid")
+                        .num_columns(2)
+                        .min_col_width(80.0)
+                        .spacing([8.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label(t!("common.units"));
+                            let old_unit = self.unit;
+                            let unit_label = match self.unit {
+                                SizeUnit::Pixels => t!("unit.pixels"),
+                                SizeUnit::Inches => t!("unit.inches"),
+                                SizeUnit::Centimeters => t!("unit.centimeters"),
+                            };
+                            egui::ComboBox::from_id_salt("units_combo")
+                                .width(160.0)
+                                .selected_text(unit_label)
+                                .show_ui(ui, |ui| {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.unit,
+                                            SizeUnit::Pixels,
+                                            t!("unit.pixels"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.convert_unit(old_unit, SizeUnit::Pixels);
+                                    }
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.unit,
+                                            SizeUnit::Inches,
+                                            t!("unit.inches"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.convert_unit(old_unit, SizeUnit::Inches);
+                                    }
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.unit,
+                                            SizeUnit::Centimeters,
+                                            t!("unit.centimeters"),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.convert_unit(old_unit, SizeUnit::Centimeters);
+                                    }
+                                });
+                            ui.end_row();
+
+                            if self.unit != SizeUnit::Pixels {
+                                ui.label(t!("common.resolution"));
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::DragValue::new(&mut self.ppi)
+                                            .speed(1.0)
+                                            .range(1.0..=1200.0),
+                                    );
+                                    ui.label(t!("unit.ppi"));
+                                });
+                                ui.end_row();
+                            }
+                        });
+
+                    // ── Final pixel size info ────────────────────────────────
+                    ui.add_space(4.0);
+                    let (px_w, px_h) = self.preview_pixels();
+                    ui.horizontal(|ui| {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(
+                                t!("common.final_size")
+                                    .replace("{0}", &px_w.to_string())
+                                    .replace("{1}", &px_h.to_string()),
+                            )
+                            .size(11.0)
+                            .color(colors.text_muted),
+                        );
+                    });
+
+                    // ── Footer ───────────────────────────────────────────────
+                    ui.add_space(4.0);
+                    accent_separator(ui, &colors);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(t!("common.cancel")).clicked() {
+                                should_close = true;
+                            }
+                            let create_btn = egui::Button::new(
+                                egui::RichText::new(format!("  {}  ", t!("common.create")))
+                                    .color(contrast_text_color(colors.accent))
+                                    .strong(),
+                            )
+                            .fill(colors.accent);
+                            if ui.add(create_btn).clicked() {
+                                self.commit_inputs();
+                                result = Some(self.to_pixels());
+                                should_close = true;
+                            }
+                        });
+                    });
+                });
+        }
+
+        if should_close {
+            self.open = false;
+        }
+
+        result
+    }
+
+    fn select_all_shortcut_pressed(&mut self, ctx: &egui::Context) -> bool {
+        let egui_shortcut = ctx.input(|i| {
+            i.events.iter().any(|event| {
+                matches!(
+                    event,
+                    egui::Event::Key {
+                        key: egui::Key::A,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.matches_logically(egui::Modifiers::COMMAND)
+                        || modifiers.ctrl
+                        || modifiers.command
+                )
+            })
+        });
+
+        let vk_probe = crate::windows_key_probe::snapshot();
+        let windows_ctrl_a_down = vk_probe.ctrl_down && crate::windows_key_probe::is_vk_down(0x41);
+        let windows_ctrl_a_edge = windows_ctrl_a_down && !self.prev_ctrl_a_down;
+        self.prev_ctrl_a_down = windows_ctrl_a_down;
+
+        egui_shortcut || windows_ctrl_a_edge
+    }
+
+    fn select_all_text_on_ctrl_a(
+        ctx: &egui::Context,
+        response: &egui::Response,
+        state: &mut egui::text_edit::TextEditState,
+        text: &str,
+        dimension_input_active: bool,
+        select_all_requested: bool,
+    ) {
+        let select_all = select_all_requested && (response.has_focus() || dimension_input_active);
+        if !select_all {
+            return;
+        }
+
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::default(),
+                egui::text::CCursor::new(text.chars().count()),
+            )));
+        state.clone().store(ctx, response.id);
+        ctx.request_repaint();
+    }
+
+    /// Convert width/height values between units
+    fn convert_unit(&mut self, from: SizeUnit, to: SizeUnit) {
+        if from == to {
+            return;
+        }
+
+        // First convert to pixels
+        let (px_w, px_h) = match from {
+            SizeUnit::Pixels => (self.width, self.height),
+            SizeUnit::Inches => (self.width * self.ppi, self.height * self.ppi),
+            SizeUnit::Centimeters => {
+                let in_w = self.width / 2.54;
+                let in_h = self.height / 2.54;
+                (in_w * self.ppi, in_h * self.ppi)
+            }
+        };
+
+        // Then convert to target unit
+        let (new_w, new_h) = match to {
+            SizeUnit::Pixels => (px_w, px_h),
+            SizeUnit::Inches => (px_w / self.ppi, px_h / self.ppi),
+            SizeUnit::Centimeters => {
+                let in_w = px_w / self.ppi;
+                let in_h = px_h / self.ppi;
+                (in_w * 2.54, in_h * 2.54)
+            }
+        };
+
+        self.width = new_w.round().max(1.0);
+        self.height = new_h.round().max(1.0);
+        self.sync_inputs_from_values();
+    }
+}
+
+fn format_dimension_value(value: f32) -> String {
+    if (value.round() - value).abs() < 0.0001 {
+        format!("{}", value.round() as i64)
+    } else {
+        let mut s = format!("{value:.4}");
+        while s.contains('.') && s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+        s
+    }
+}
+
+fn evaluate_dimension_expression(input: &str) -> Option<f32> {
+    #[derive(Clone, Copy)]
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    impl<'a> Parser<'a> {
+        fn new(src: &'a str) -> Self {
+            Self {
+                bytes: src.as_bytes(),
+                pos: 0,
+            }
+        }
+
+        fn skip_ws(&mut self) {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+
+        fn parse_expr(&mut self) -> Option<f32> {
+            let mut value = self.parse_term()?;
+            loop {
+                self.skip_ws();
+                let Some(&op) = self.bytes.get(self.pos) else {
+                    break;
+                };
+                if op != b'+' && op != b'-' {
+                    break;
+                }
+                self.pos += 1;
+                let rhs = self.parse_term()?;
+                value = if op == b'+' { value + rhs } else { value - rhs };
+            }
+            Some(value)
+        }
+
+        fn parse_term(&mut self) -> Option<f32> {
+            let mut value = self.parse_factor()?;
+            loop {
+                self.skip_ws();
+                let Some(&op) = self.bytes.get(self.pos) else {
+                    break;
+                };
+                if op != b'*' && op != b'/' {
+                    break;
+                }
+                self.pos += 1;
+                let rhs = self.parse_factor()?;
+                value = if op == b'*' {
+                    value * rhs
+                } else {
+                    if rhs.abs() < f32::EPSILON {
+                        return None;
+                    }
+                    value / rhs
+                };
+            }
+            Some(value)
+        }
+
+        fn parse_factor(&mut self) -> Option<f32> {
+            self.skip_ws();
+            if let Some(&b'+') = self.bytes.get(self.pos) {
+                self.pos += 1;
+                return self.parse_factor();
+            }
+            if let Some(&b'-') = self.bytes.get(self.pos) {
+                self.pos += 1;
+                return self.parse_factor().map(|v| -v);
+            }
+            if let Some(&b'(') = self.bytes.get(self.pos) {
+                self.pos += 1;
+                let value = self.parse_expr()?;
+                self.skip_ws();
+                if self.bytes.get(self.pos) == Some(&b')') {
+                    self.pos += 1;
+                    return Some(value);
+                }
+                return None;
+            }
+            self.parse_number()
+        }
+
+        fn parse_number(&mut self) -> Option<f32> {
+            self.skip_ws();
+            let start = self.pos;
+            let mut seen_digit = false;
+            let mut seen_dot = false;
+            while let Some(&ch) = self.bytes.get(self.pos) {
+                if ch.is_ascii_digit() {
+                    seen_digit = true;
+                    self.pos += 1;
+                } else if ch == b'.' && !seen_dot {
+                    seen_dot = true;
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            if !seen_digit {
+                return None;
+            }
+            std::str::from_utf8(&self.bytes[start..self.pos])
+                .ok()?
+                .parse::<f32>()
+                .ok()
+        }
+    }
+
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut parser = Parser::new(trimmed);
+    let value = parser.parse_expr()?;
+    parser.skip_ws();
+    if parser.pos != parser.bytes.len() || !value.is_finite() {
+        return None;
+    }
+    Some(value)
+}
+
+// ============================================================================
+// IMAGE FORMAT ENUM
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum SaveFormat {
+    #[default]
+    Png,
+    Jpeg,
+    Webp,
+    Bmp,
+    Tga,
+    Ico,
+    Tiff,
+    Gif,
+    Pfe,
+}
+
+/// Compression options for TIFF format
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum TiffCompression {
+    #[default]
+    None,
+    Lzw,
+    Deflate,
+}
+
+impl SaveFormat {
+    pub fn extension(&self) -> &'static str {
+        match self {
+            SaveFormat::Png => "png",
+            SaveFormat::Jpeg => "jpg",
+            SaveFormat::Webp => "webp",
+            SaveFormat::Bmp => "bmp",
+            SaveFormat::Tga => "tga",
+            SaveFormat::Ico => "ico",
+            SaveFormat::Tiff => "tiff",
+            SaveFormat::Gif => "gif",
+            SaveFormat::Pfe => "pfe",
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            SaveFormat::Png => t!("format.png"),
+            SaveFormat::Jpeg => t!("format.jpeg"),
+            SaveFormat::Webp => t!("format.webp"),
+            SaveFormat::Bmp => t!("format.bmp"),
+            SaveFormat::Tga => t!("format.tga"),
+            SaveFormat::Ico => t!("format.ico"),
+            SaveFormat::Tiff => t!("format.tiff"),
+            SaveFormat::Gif => t!("format.gif"),
+            SaveFormat::Pfe => t!("format.pfe"),
+        }
+    }
+
+    pub fn supports_quality(&self) -> bool {
+        matches!(self, SaveFormat::Jpeg | SaveFormat::Webp)
+    }
+
+    /// Returns true if this format supports animated (multi-frame) output.
+    pub fn supports_animation(&self) -> bool {
+        matches!(self, SaveFormat::Png | SaveFormat::Gif | SaveFormat::Webp)
+    }
+
+    fn all() -> &'static [SaveFormat] {
+        &[
+            SaveFormat::Pfe,
+            SaveFormat::Png,
+            SaveFormat::Jpeg,
+            SaveFormat::Webp,
+            SaveFormat::Bmp,
+            SaveFormat::Tga,
+            SaveFormat::Ico,
+            SaveFormat::Tiff,
+            SaveFormat::Gif,
+        ]
+    }
+}
+
+// ============================================================================
+// PREVIEW GENERATION
+// ============================================================================
+
+/// Result of encoding an image for preview purposes
+pub struct PreviewResult {
+    /// The encoded file size in bytes
+    pub file_size: usize,
+    /// The decoded preview image (showing compression artifacts)
+    pub preview_image: RgbaImage,
+}
+
+/// Encode an image to a format with quality settings and return size + decoded preview
+/// This is used to show what the saved image will look like
+pub fn generate_preview(
+    image: &RgbaImage,
+    format: SaveFormat,
+    quality: u8,
+    webp_lossless: bool,
+) -> Option<PreviewResult> {
+    let mut buffer = Vec::new();
+
+    match format {
+        SaveFormat::Png => {
+            // PNG is lossless, just get the size
+            let mut cursor = Cursor::new(&mut buffer);
+            let encoder = PngEncoder::new(&mut cursor);
+            encoder
+                .write_image(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .ok()?;
+
+            Some(PreviewResult {
+                file_size: buffer.len(),
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Jpeg => {
+            // JPEG is lossy - encode then decode to show artifacts
+            let rgb_image = DynamicImage::ImageRgba8(image.clone()).to_rgb8();
+            let mut cursor = Cursor::new(&mut buffer);
+            let mut encoder = JpegEncoder::new_with_quality(&mut cursor, quality);
+            encoder
+                .encode(
+                    rgb_image.as_raw(),
+                    rgb_image.width(),
+                    rgb_image.height(),
+                    image::ColorType::Rgb8.into(),
+                )
+                .ok()?;
+
+            // Decode back to show compression artifacts
+            let decoded = image::load_from_memory(&buffer).ok()?;
+            let preview = decoded.to_rgba8();
+
+            Some(PreviewResult {
+                file_size: buffer.len(),
+                preview_image: preview,
+            })
+        }
+        SaveFormat::Webp => {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let encoder =
+                    webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height());
+                let encoded = if webp_lossless {
+                    encoder.encode_lossless()
+                } else {
+                    encoder.encode(quality.clamp(1, 100) as f32)
+                };
+                buffer.extend_from_slice(&encoded);
+            }
+            // Web fallback: pure-Rust lossless-only WebP encoder (no libwebp).
+            #[cfg(target_arch = "wasm32")]
+            {
+                use image::ImageEncoder;
+                let _ = webp_lossless;
+                let _ = quality;
+                let encoder = image::codecs::webp::WebPEncoder::new_lossless(&mut buffer);
+                encoder
+                    .write_image(
+                        image.as_raw(),
+                        image.width(),
+                        image.height(),
+                        image::ExtendedColorType::Rgba8,
+                    )
+                    .ok()?;
+            }
+
+            // Decode back
+            let decoded = image::load_from_memory(&buffer).ok()?;
+            let preview = decoded.to_rgba8();
+
+            Some(PreviewResult {
+                file_size: buffer.len(),
+                preview_image: preview,
+            })
+        }
+        SaveFormat::Bmp => {
+            // BMP is lossless
+            let mut cursor = Cursor::new(&mut buffer);
+            let mut encoder = BmpEncoder::new(&mut cursor);
+            encoder
+                .encode(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                    image::ColorType::Rgba8.into(),
+                )
+                .ok()?;
+
+            Some(PreviewResult {
+                file_size: buffer.len(),
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Tga => {
+            // TGA - estimate size (lossless)
+            // TGA with RGBA is roughly width * height * 4 + header
+            let estimated_size = (image.width() * image.height() * 4) as usize + 18;
+
+            Some(PreviewResult {
+                file_size: estimated_size,
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Ico => {
+            // ICO is lossless (PNG-encoded inside)
+            // Estimate size based on the image data
+            let mut buffer = Vec::new();
+            let mut cursor = Cursor::new(&mut buffer);
+            let encoder = PngEncoder::new(&mut cursor);
+            #[allow(deprecated)]
+            encoder
+                .write_image(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .ok()?;
+            // ICO overhead: ~22 bytes header + 16 bytes per entry + PNG data
+            let estimated_size = buffer.len() + 38;
+
+            Some(PreviewResult {
+                file_size: estimated_size,
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Tiff => {
+            // TIFF is lossless
+            let mut buffer = Vec::new();
+            let mut cursor = Cursor::new(&mut buffer);
+            let encoder = TiffEncoder::new(&mut cursor);
+            encoder
+                .write_image(
+                    image.as_raw(),
+                    image.width(),
+                    image.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .ok()?;
+
+            Some(PreviewResult {
+                file_size: buffer.len(),
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Pfe => {
+            // PFE is a project format — no single-image preview needed
+            // Estimate a rough size (header + raw pixels)
+            let estimated_size = (image.width() * image.height() * 4) as usize + 64;
+
+            Some(PreviewResult {
+                file_size: estimated_size,
+                preview_image: image.clone(),
+            })
+        }
+        SaveFormat::Gif => {
+            // GIF is lossy (256 colors max) — estimate size
+            // Rough estimate: width * height (indexed color) + overhead
+            let estimated_size = (image.width() * image.height()) as usize + 800;
+
+            Some(PreviewResult {
+                file_size: estimated_size,
+                preview_image: image.clone(),
+            })
+        }
+    }
+}
+
+/// Create a thumbnail of an image for preview display
+pub fn create_thumbnail(image: &RgbaImage, max_size: u32) -> RgbaImage {
+    let (width, height) = image.dimensions();
+
+    if width <= max_size && height <= max_size {
+        return image.clone();
+    }
+
+    let scale = (max_size as f32 / width.max(height) as f32).min(1.0);
+    let new_width = ((width as f32 * scale) as u32).max(1);
+    let new_height = ((height as f32 * scale) as u32).max(1);
+
+    image::imageops::resize(image, new_width, new_height, FilterType::Triangle)
+}
+
+/// Convert RgbaImage to egui ColorImage
+fn rgba_to_color_image(img: &RgbaImage) -> ColorImage {
+    let size = [img.width() as usize, img.height() as usize];
+    let pixels: Vec<Color32> = img
+        .pixels()
+        .map(|p| Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3]))
+        .collect();
+    ColorImage {
+        size,
+        source_size: egui::Vec2::new(img.width() as f32, img.height() as f32),
+        pixels,
+    }
+}
+
+// ============================================================================
+// SAVE ACTION
+// ============================================================================
+
+#[derive(Clone, Debug)]
+pub struct SaveAction {
+    pub path: PathBuf,
+    pub format: SaveFormat,
+    pub quality: u8,
+    pub webp_lossless: bool,
+    pub tiff_compression: TiffCompression,
+    /// Whether to save as animated (multi-frame)
+    pub animated: bool,
+    /// Animation FPS (1-60)
+    pub animation_fps: f32,
+    /// GIF max colors (2-256)
+    pub gif_colors: u16,
+    /// GIF dithering enabled
+    pub gif_dither: bool,
+}
+
+// ============================================================================
+// SAVE FILE DIALOG
+// ============================================================================
+
+/// Maximum size for preview thumbnail (keeps preview generation fast).
+/// 512 gives enough resolution to zoom in meaningfully on large images.
+const PREVIEW_MAX_SIZE: u32 = 512;
+/// Pixel size of the interactive preview panel (square).
+const PREVIEW_PANEL_SIZE: f32 = 320.0;
+
+pub struct SaveFileDialog {
+    pub open: bool,
+    filename: String,
+    format: SaveFormat,
+    quality: u8,
+    webp_lossless: bool,
+    tiff_compression: TiffCompression,
+    target_directory: Option<PathBuf>,
+
+    // Preview state
+    source_thumbnail: Option<RgbaImage>,
+    source_dimensions: (u32, u32), // Full source image dimensions
+    preview_texture: Option<TextureHandle>,
+    preview_file_size: usize,   // Thumbnail-based file size
+    estimated_full_size: usize, // Estimated full-resolution file size
+    last_preview_format: SaveFormat,
+    last_preview_quality: u8,
+    last_preview_webp_lossless: bool,
+    needs_preview_update: bool,
+
+    // Interactive preview pan/zoom
+    /// 0.0 = not yet computed (will auto-fit on first frame)
+    preview_zoom: f32,
+    /// Top-left visible corner in source-pixel coordinates
+    preview_pan: egui::Vec2,
+    /// (start screen pos, start pan) when a drag is in progress
+    preview_drag_start: Option<(egui::Pos2, egui::Vec2)>,
+    /// Whether the texture was last uploaded with NEAREST filter
+    preview_texture_is_nearest: bool,
+
+    // Animation options
+    animated: bool,     // "Animated" checkbox
+    animation_fps: f32, // FPS slider (1–60, default 10)
+    gif_colors: u16,    // GIF color count (2–256, default 256)
+    gif_dither: bool,   // GIF dithering toggle
+    layer_count: usize, // number of layers/frames available
+    was_animated: bool, // whether source was animated on import
+
+    // Animation preview playback
+    anim_playing: bool,                         // play/pause state
+    anim_current_frame: usize,                  // which frame is displayed (0-based)
+    anim_last_frame_time: f64,                  // timestamp of last frame advance
+    frame_thumbnails: Vec<RgbaImage>,           // per-frame thumbnails
+    frame_textures: Vec<Option<TextureHandle>>, // cached per-frame textures
+}
+
+impl Default for SaveFileDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            filename: "untitled".to_string(),
+            format: SaveFormat::Png,
+            quality: 90,
+            webp_lossless: true,
+            tiff_compression: TiffCompression::None,
+            target_directory: None,
+            source_thumbnail: None,
+            source_dimensions: (0, 0),
+            preview_texture: None,
+            preview_file_size: 0,
+            estimated_full_size: 0,
+            last_preview_format: SaveFormat::Png,
+            last_preview_quality: 90,
+            last_preview_webp_lossless: true,
+            needs_preview_update: true,
+            preview_zoom: 0.0,
+            preview_pan: egui::Vec2::ZERO,
+            preview_drag_start: None,
+            preview_texture_is_nearest: false,
+            // Animation
+            animated: false,
+            animation_fps: 10.0,
+            gif_colors: 256,
+            gif_dither: true,
+            layer_count: 1,
+            was_animated: false,
+            anim_playing: false,
+            anim_current_frame: 0,
+            anim_last_frame_time: 0.0,
+            frame_thumbnails: Vec::new(),
+            frame_textures: Vec::new(),
+        }
+    }
+}
+
+impl SaveFileDialog {
+    /// Reset dialog state for a fresh "Save As"
+    pub fn reset(&mut self) {
+        self.filename = "untitled".to_string();
+        self.target_directory = None;
+        self.source_thumbnail = None;
+        self.source_dimensions = (0, 0);
+        self.preview_texture = None;
+        self.preview_file_size = 0;
+        self.estimated_full_size = 0;
+        self.needs_preview_update = true;
+        self.webp_lossless = true;
+        self.preview_zoom = 0.0;
+        self.preview_pan = egui::Vec2::ZERO;
+        self.preview_drag_start = None;
+        self.preview_texture_is_nearest = false;
+        // Animation reset
+        self.animated = false;
+        self.animation_fps = 10.0;
+        self.gif_colors = 256;
+        self.gif_dither = true;
+        self.layer_count = 1;
+        self.was_animated = false;
+        self.anim_playing = false;
+        self.anim_current_frame = 0;
+        self.anim_last_frame_time = 0.0;
+        self.frame_thumbnails.clear();
+        self.frame_textures.clear();
+    }
+
+    /// Set the source image for preview generation
+    /// Creates a thumbnail for efficient preview rendering
+    pub fn set_source_image(&mut self, image: &RgbaImage) {
+        self.source_dimensions = (image.width(), image.height());
+        self.source_thumbnail = Some(create_thumbnail(image, PREVIEW_MAX_SIZE));
+        self.needs_preview_update = true;
+        // Reset pan/zoom so auto-fit recalculates for the new image.
+        self.preview_zoom = 0.0;
+        self.preview_pan = egui::Vec2::ZERO;
+        self.preview_drag_start = None;
+        self.preview_texture_is_nearest = false;
+    }
+
+    /// Set animation info and per-frame thumbnails for the save dialog.
+    /// `frame_images`: one RgbaImage per frame/layer (composite of that layer alone).
+    /// `was_animated`: whether the source file was already animated.
+    /// `fps`: animation fps from import or default.
+    pub fn set_source_animated(
+        &mut self,
+        frame_images: &[RgbaImage],
+        was_animated: bool,
+        fps: f32,
+    ) {
+        self.layer_count = frame_images.len();
+        self.was_animated = was_animated;
+        self.animated = was_animated;
+        self.animation_fps = fps;
+        self.anim_current_frame = 0;
+        self.anim_playing = false;
+        self.frame_thumbnails.clear();
+        self.frame_textures.clear();
+
+        for img in frame_images {
+            let thumb = create_thumbnail(img, PREVIEW_MAX_SIZE);
+            self.frame_thumbnails.push(thumb);
+            self.frame_textures.push(None);
+        }
+    }
+
+    /// Set filename from an existing path (for re-saves)
+    pub fn set_from_path(&mut self, path: &std::path::Path) {
+        if let Some(stem) = path.file_stem() {
+            self.filename = stem.to_string_lossy().to_string();
+        }
+        if let Some(ext) = path.extension() {
+            self.format = match ext.to_string_lossy().to_lowercase().as_str() {
+                "png" => SaveFormat::Png,
+                "jpg" | "jpeg" => SaveFormat::Jpeg,
+                "webp" => SaveFormat::Webp,
+                "bmp" => SaveFormat::Bmp,
+                "tga" => SaveFormat::Tga,
+                "ico" => SaveFormat::Ico,
+                "tiff" | "tif" => SaveFormat::Tiff,
+                "gif" => SaveFormat::Gif,
+                _ => SaveFormat::Png,
+            };
+        }
+        self.target_directory = path.parent().map(|p| p.to_path_buf());
+        self.needs_preview_update = true;
+    }
+
+    /// Update preview if settings have changed
+    fn update_preview_if_needed(&mut self, ctx: &egui::Context) {
+        // Check if we need to regenerate
+        let settings_changed = self.format != self.last_preview_format
+            || (self.format.supports_quality() && self.quality != self.last_preview_quality);
+        let webp_settings_changed = self.format == SaveFormat::Webp
+            && self.webp_lossless != self.last_preview_webp_lossless;
+
+        if !self.needs_preview_update && !settings_changed && !webp_settings_changed {
+            return;
+        }
+
+        if let Some(thumbnail) = &self.source_thumbnail {
+            let thumb_w = thumbnail.width();
+            let thumb_h = thumbnail.height();
+            if let Some(preview_result) =
+                generate_preview(thumbnail, self.format, self.quality, self.webp_lossless)
+            {
+                // Update texture
+                let color_image = rgba_to_color_image(&preview_result.preview_image);
+                self.preview_texture =
+                    Some(ctx.load_texture("save_preview", color_image, TextureOptions::LINEAR));
+                self.preview_file_size = preview_result.file_size;
+
+                // Estimate full-resolution file size by scaling from thumbnail ratio
+                let (fw, fh) = self.source_dimensions;
+                let full_pixels = fw as f64 * fh as f64;
+                let thumb_pixels = thumb_w as f64 * thumb_h as f64;
+                if thumb_pixels > 0.0 {
+                    let ratio = full_pixels / thumb_pixels;
+                    self.estimated_full_size = (preview_result.file_size as f64 * ratio) as usize;
+                } else {
+                    self.estimated_full_size = preview_result.file_size;
+                }
+            }
+        }
+
+        self.last_preview_format = self.format;
+        self.last_preview_quality = self.quality;
+        self.last_preview_webp_lossless = self.webp_lossless;
+        self.needs_preview_update = false;
+    }
+
+    /// Format file size for display
+    fn format_file_size(bytes: usize) -> String {
+        if bytes < 1024 {
+            format!("{} B", bytes)
+        } else if bytes < 1024 * 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else {
+            format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+        }
+    }
+
+    /// Show the dialog and return SaveAction if user confirms
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<SaveAction> {
+        use crate::ops::dialogs::{
+            DialogColors, accent_separator, contrast_text_color, paint_dialog_header, section_label,
+        };
+
+        let mut result = None;
+        let mut should_close = false;
+
+        if self.open {
+            // Update preview before showing UI
+            self.update_preview_if_needed(ctx);
+
+            // Animation playback: advance frame if playing
+            let show_anim_controls = self.format.supports_animation()
+                && self.animated
+                && self.frame_thumbnails.len() > 1;
+
+            if show_anim_controls && self.anim_playing {
+                let now = ctx.input(|i| i.time);
+                let frame_duration = 1.0 / self.animation_fps as f64;
+                if now - self.anim_last_frame_time >= frame_duration {
+                    self.anim_current_frame =
+                        (self.anim_current_frame + 1) % self.frame_thumbnails.len();
+                    self.anim_last_frame_time = now;
+                }
+                ctx.request_repaint();
+            }
+
+            // Keyboard: Enter = Save (opens native picker), Esc = Cancel
+            let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+            let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+            if esc {
+                should_close = true;
+            }
+
+            egui::Window::new("save_file_dialog_internal")
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    let colors = DialogColors::from_ctx(ctx);
+                    ui.set_min_width(640.0);
+
+                    // ── Header ──────────────────────────────────────────────
+                    paint_dialog_header(ui, &colors, "\u{1F4BE}", "Save As");
+                    ui.add_space(8.0);
+
+                    // ── Two-column layout ────────────────────────────────────
+                    ui.horizontal(|ui| {
+                        // ── LEFT: Preview ────────────────────────────────────
+                        ui.vertical(|ui| {
+                            ui.set_width(PREVIEW_PANEL_SIZE);
+
+                            let preview_size = egui::vec2(PREVIEW_PANEL_SIZE, PREVIEW_PANEL_SIZE);
+                            let (rect, response) = ui.allocate_exact_size(preview_size, egui::Sense::click_and_drag());
+
+                            // Choose texture filter based on zoom level
+                            let use_nearest = self.preview_zoom > 2.0;
+                            let tex_opts = if use_nearest { TextureOptions::NEAREST } else { TextureOptions::LINEAR };
+
+                            // Reload textures if filter changed
+                            if use_nearest != self.preview_texture_is_nearest {
+                                self.preview_texture = None;
+                                self.frame_textures.iter_mut().for_each(|t| *t = None);
+                                self.preview_texture_is_nearest = use_nearest;
+                            }
+
+                            // Load still preview texture on demand
+                            if !show_anim_controls
+                                && self.preview_texture.is_none()
+                                && let Some(thumb) = &self.source_thumbnail
+                            {
+                                let color_image = rgba_to_color_image(thumb);
+                                self.preview_texture = Some(ctx.load_texture(
+                                    "save_preview",
+                                    color_image,
+                                    tex_opts,
+                                ));
+                            }
+
+                            // Determine which texture to show
+                            let display_texture = if show_anim_controls {
+                                let idx = self.anim_current_frame.min(self.frame_thumbnails.len().saturating_sub(1));
+                                if self.frame_textures[idx].is_none() {
+                                    let color_image = rgba_to_color_image(&self.frame_thumbnails[idx]);
+                                    self.frame_textures[idx] = Some(ctx.load_texture(
+                                        format!("frame_preview_{}", idx),
+                                        color_image,
+                                        tex_opts,
+                                    ));
+                                }
+                                self.frame_textures[idx].as_ref()
+                            } else {
+                                self.preview_texture.as_ref()
+                            };
+
+                            // Auto-fit: compute initial zoom when zoom == 0.0
+                            if let Some(texture) = display_texture {
+                                let tex_size = texture.size_vec2();
+                                if self.preview_zoom == 0.0 {
+                                    let fit = (PREVIEW_PANEL_SIZE / tex_size.x).min(PREVIEW_PANEL_SIZE / tex_size.y);
+                                    self.preview_zoom = if fit < 1.0 { fit } else { fit.min(32.0) };
+                                    let vis_w = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                    let vis_h = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                    self.preview_pan = egui::Vec2::new(
+                                        (tex_size.x - vis_w) / 2.0,
+                                        (tex_size.y - vis_h) / 2.0,
+                                    );
+                                }
+                            }
+
+                            // Drag to pan
+                            if response.dragged() {
+                                self.preview_pan -= response.drag_delta() / self.preview_zoom;
+                            }
+
+                            // Scroll to zoom (centered on cursor)
+                            let scroll_dy = ctx.input(|i| i.smooth_scroll_delta.y);
+                            let hover_pos = ctx.input(|i| i.pointer.hover_pos());
+                            if rect.contains(hover_pos.unwrap_or(egui::Pos2::ZERO)) && scroll_dy != 0.0 {
+                                let old_zoom = self.preview_zoom;
+                                let factor = if scroll_dy > 0.0 { 1.15_f32 } else { 1.0 / 1.15 };
+                                self.preview_zoom = (self.preview_zoom * factor).clamp(0.05, 64.0);
+                                if let Some(cursor) = hover_pos {
+                                    let off = cursor - rect.min;
+                                    let src_x = self.preview_pan.x + off.x / old_zoom;
+                                    let src_y = self.preview_pan.y + off.y / old_zoom;
+                                    self.preview_pan = egui::Vec2::new(
+                                        src_x - off.x / self.preview_zoom,
+                                        src_y - off.y / self.preview_zoom,
+                                    );
+                                }
+                                ctx.request_repaint();
+                            }
+
+                            // Double-click: reset to auto-fit
+                            if response.double_clicked() {
+                                self.preview_zoom = 0.0;
+                                self.preview_pan = egui::Vec2::ZERO;
+                            }
+
+                            // Clamp pan to valid range
+                            if let Some(texture) = display_texture {
+                                let ts = texture.size_vec2();
+                                let vis_w = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                let vis_h = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                self.preview_pan.x = self.preview_pan.x
+                                    .clamp((0.0_f32).min(ts.x - vis_w), (ts.x - vis_w).max(0.0));
+                                self.preview_pan.y = self.preview_pan.y
+                                    .clamp((0.0_f32).min(ts.y - vis_h), (ts.y - vis_h).max(0.0));
+                            }
+
+                            // Checkerboard background
+                            let painter = ui.painter_at(rect);
+                            let grid_size = 8.0;
+                            let light = Color32::from_gray(200);
+                            let dark  = Color32::from_gray(160);
+                            for row in 0..((rect.height() / grid_size).ceil() as i32) {
+                                for col in 0..((rect.width() / grid_size).ceil() as i32) {
+                                    let color = if (col + row) % 2 == 0 { light } else { dark };
+                                    let cell_rect = egui::Rect::from_min_size(
+                                        rect.min + egui::vec2(col as f32 * grid_size, row as f32 * grid_size),
+                                        egui::vec2(grid_size, grid_size),
+                                    ).intersect(rect);
+                                    painter.rect_filled(cell_rect, 0.0, color);
+                                }
+                            }
+
+                            // Draw preview via UV rect for zoom/pan
+                            if let Some(texture) = display_texture {
+                                let ts = texture.size_vec2();
+                                let vis_w = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                let vis_h = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                let uv = egui::Rect::from_min_max(
+                                    egui::pos2(self.preview_pan.x / ts.x, self.preview_pan.y / ts.y),
+                                    egui::pos2(
+                                        (self.preview_pan.x + vis_w) / ts.x,
+                                        (self.preview_pan.y + vis_h) / ts.y,
+                                    ),
+                                );
+                                painter.image(texture.id(), rect, uv, Color32::WHITE);
+
+                                // Thin scrollbar indicators
+                                let bar_color = Color32::from_rgba_premultiplied(120, 120, 120, 160);
+                                let bar_w = 4.0;
+                                if vis_w < ts.x {
+                                    let ratio = self.preview_pan.x / (ts.x - vis_w).max(1.0);
+                                    let bar_len = (PREVIEW_PANEL_SIZE * (vis_w / ts.x)).max(16.0);
+                                    let bar_x = rect.min.x + ratio * (PREVIEW_PANEL_SIZE - bar_len);
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(bar_x, rect.max.y - bar_w - 1.0),
+                                            egui::vec2(bar_len, bar_w),
+                                        ),
+                                        2.0, bar_color,
+                                    );
+                                }
+                                if vis_h < ts.y {
+                                    let ratio = self.preview_pan.y / (ts.y - vis_h).max(1.0);
+                                    let bar_len = (PREVIEW_PANEL_SIZE * (vis_h / ts.y)).max(16.0);
+                                    let bar_y = rect.min.y + ratio * (PREVIEW_PANEL_SIZE - bar_len);
+                                    painter.rect_filled(
+                                        egui::Rect::from_min_size(
+                                            egui::pos2(rect.max.x - bar_w - 1.0, bar_y),
+                                            egui::vec2(bar_w, bar_len),
+                                        ),
+                                        2.0, bar_color,
+                                    );
+                                }
+                            }
+
+                            // Zoom controls strip
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.small_button("\u{2212}").clicked() {
+                                    self.preview_zoom = (self.preview_zoom / 1.25).max(0.05);
+                                }
+                                let zoom_pct = (self.preview_zoom * 100.0).round() as u32;
+                                if ui.small_button(format!("{}%", zoom_pct)).clicked() {
+                                    // Click zoom label → jump to 100 %
+                                    self.preview_zoom = 1.0;
+                                    if let Some(texture) = display_texture {
+                                        let ts = texture.size_vec2();
+                                        let vis_w = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                        let vis_h = PREVIEW_PANEL_SIZE / self.preview_zoom;
+                                        self.preview_pan = egui::Vec2::new(
+                                            (ts.x - vis_w) / 2.0,
+                                            (ts.y - vis_h) / 2.0,
+                                        );
+                                    }
+                                }
+                                if ui.small_button("\u{2B}").clicked() {
+                                    self.preview_zoom = (self.preview_zoom * 1.25).min(64.0);
+                                }
+                                if ui.small_button("\u{229E} Fit").clicked() {
+                                    self.preview_zoom = 0.0;
+                                    self.preview_pan = egui::Vec2::ZERO;
+                                }
+                            });
+
+                            // Animation playback controls
+                            if show_anim_controls {
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("\u{23EE}").clicked() {
+                                        self.anim_current_frame = 0;
+                                        self.anim_playing = false;
+                                    }
+                                    if ui.small_button("\u{23EA}").clicked() {
+                                        if self.anim_current_frame > 0 {
+                                            self.anim_current_frame -= 1;
+                                        } else {
+                                            self.anim_current_frame = self.frame_thumbnails.len() - 1;
+                                        }
+                                        self.anim_playing = false;
+                                    }
+                                    let play_label = if self.anim_playing { "\u{23F8}" } else { "\u{25B6}" };
+                                    if ui.small_button(play_label).clicked() {
+                                        self.anim_playing = !self.anim_playing;
+                                        if self.anim_playing {
+                                            self.anim_last_frame_time = ctx.input(|i| i.time);
+                                        }
+                                    }
+                                    if ui.small_button("\u{23E9}").clicked() {
+                                        self.anim_current_frame = (self.anim_current_frame + 1) % self.frame_thumbnails.len();
+                                        self.anim_playing = false;
+                                    }
+                                    if ui.small_button("\u{23ED}").clicked() {
+                                        self.anim_current_frame = self.frame_thumbnails.len() - 1;
+                                        self.anim_playing = false;
+                                    }
+                                });
+                                ui.small(format!("Frame {} / {}", self.anim_current_frame + 1, self.frame_thumbnails.len()));
+                            } else {
+                                let size_text = format!("Est. {}", Self::format_file_size(self.estimated_full_size));
+                                ui.label(egui::RichText::new(size_text).size(11.0).color(colors.text_muted));
+                            }
+
+                            let dim_text = format!("{}×{}", self.source_dimensions.0, self.source_dimensions.1);
+                            ui.label(egui::RichText::new(dim_text).size(11.0).color(colors.text_muted));
+                        });
+
+                        ui.add_space(12.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+
+                        // ── RIGHT: Format settings ────────────────────────────
+                        ui.vertical(|ui| {
+                            ui.set_width(240.0);
+
+                            // ── FORMAT ────────────────────────────────────────
+                            section_label(ui, &colors, "FORMAT");
+                            egui::ComboBox::from_id_salt("format_combo")
+                                .width(220.0)
+                                .selected_text(self.format.label())
+                                .show_ui(ui, |ui| {
+                                    for format in SaveFormat::all() {
+                                        ui.selectable_value(&mut self.format, *format, format.label());
+                                    }
+                                });
+
+                            // ── QUALITY (JPEG / WebP) ─────────────────────────
+                            if self.format.supports_quality() {
+                                accent_separator(ui, &colors);
+                                if self.format == SaveFormat::Webp {
+                                    section_label(ui, &colors, "WEBP");
+                                    if ui.checkbox(&mut self.webp_lossless, "Lossless").changed() {
+                                        self.needs_preview_update = true;
+                                        ctx.request_repaint();
+                                    }
+                                }
+                                if self.format != SaveFormat::Webp || !self.webp_lossless {
+                                    section_label(ui, &colors, "QUALITY");
+                                    if ui.add(egui::Slider::new(&mut self.quality, 1..=100).suffix("%")).changed() {
+                                        ctx.request_repaint();
+                                    }
+                                }
+                                if self.format != SaveFormat::Webp || !self.webp_lossless {
+                                    let hint = match self.quality {
+                                        1..=30 => "Very Low",
+                                        31..=50 => "Low",
+                                        51..=70 => "Medium",
+                                        71..=85 => "Good",
+                                        86..=95 => "High",
+                                        _ => "Maximum",
+                                    };
+                                    ui.label(egui::RichText::new(hint).size(11.0).color(colors.text_muted));
+                                } else {
+                                    ui.label(egui::RichText::new("Exact pixels, larger than lossy").size(11.0).color(colors.text_muted));
+                                }
+                                if self.format == SaveFormat::Webp && self.animated {
+                                    ui.label(egui::RichText::new("Animated WebP can use per-frame layer options.").size(11.0).color(colors.text_muted));
+                                }
+                            }
+
+                            // ── COMPRESSION (TIFF) ────────────────────────────
+                            if self.format == SaveFormat::Tiff {
+                                accent_separator(ui, &colors);
+                                section_label(ui, &colors, "COMPRESSION");
+                                egui::ComboBox::from_id_salt("tiff_compression_combo")
+                                    .width(160.0)
+                                    .selected_text(match self.tiff_compression {
+                                        TiffCompression::None    => "None",
+                                        TiffCompression::Lzw     => "LZW",
+                                        TiffCompression::Deflate => "Deflate",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.tiff_compression, TiffCompression::None,    "None");
+                                        ui.selectable_value(&mut self.tiff_compression, TiffCompression::Lzw,     "LZW");
+                                        ui.selectable_value(&mut self.tiff_compression, TiffCompression::Deflate, "Deflate");
+                                    });
+                            }
+
+                            // ── ICO warning ───────────────────────────────────
+                            if self.format == SaveFormat::Ico {
+                                accent_separator(ui, &colors);
+                                ui.add_space(4.0);
+                                let (w, h) = self.source_dimensions;
+                                if w > 256 || h > 256 {
+                                    ui.colored_label(
+                                        Color32::from_rgb(255, 180, 50),
+                                        format!("\u{26A0} {}×{} exceeds 256×256 and will be scaled down.", w, h),
+                                    );
+                                } else {
+                                    ui.label(egui::RichText::new("ICO supports up to 256×256 per entry.").size(11.0).color(colors.text_muted));
+                                }
+                            }
+
+                            // ── ANIMATION (PNG / GIF with multiple layers) ────
+                            if self.format.supports_animation() && self.layer_count > 1 {
+                                accent_separator(ui, &colors);
+                                section_label(ui, &colors, "ANIMATION");
+                                ui.checkbox(&mut self.animated, "Animated");
+
+                                if self.animated {
+                                    ui.add_space(4.0);
+                                    egui::Grid::new("anim_options_grid")
+                                        .num_columns(2)
+                                        .min_col_width(60.0)
+                                        .spacing([8.0, 4.0])
+                                        .show(ui, |ui| {
+                                            ui.label("FPS");
+                                            ui.add(egui::Slider::new(&mut self.animation_fps, 1.0..=60.0)
+                                                .step_by(1.0)
+                                                .suffix(" fps"));
+                                            ui.end_row();
+
+                                            if self.format == SaveFormat::Gif {
+                                                ui.label("Colors");
+                                                let mut colors_f = self.gif_colors as f32;
+                                                if ui.add(egui::Slider::new(&mut colors_f, 2.0..=256.0)
+                                                    .step_by(1.0)
+                                                    .logarithmic(true)
+                                                ).changed() {
+                                                    self.gif_colors = colors_f as u16;
+                                                }
+                                                ui.end_row();
+
+                                                ui.label("Dither");
+                                                ui.checkbox(&mut self.gif_dither, "");
+                                                ui.end_row();
+                                            }
+                                        });
+
+                                    if self.layer_count > 1 {
+                                        ui.label(egui::RichText::new(
+                                            format!("{} frames × {:.0} fps = {:.1}s",
+                                                self.layer_count, self.animation_fps,
+                                                self.layer_count as f32 / self.animation_fps)
+                                        ).size(11.0).color(colors.text_muted));
+                                    }
+                                }
+                            }
+                        });
+                    });
+
+                    // ── Footer (full-width, below both columns) ───────────────
+                    accent_separator(ui, &colors);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("  Cancel  ").clicked() {
+                                should_close = true;
+                            }
+                            let save_btn = egui::Button::new(
+                                egui::RichText::new("  Save  ")
+                                    .color(contrast_text_color(colors.accent))
+                                    .strong()
+                            ).fill(colors.accent);
+                            let save_clicked = ui.add(save_btn).clicked() || enter;
+                            if save_clicked {
+                                let full_filename = format!("{}.{}", self.filename, self.format.extension());
+                                // Web has no native save-location picker: downloads always
+                                // go to the browser's default download folder, so we skip
+                                // straight to a virtual path carrying just the file name.
+                                #[cfg(target_arch = "wasm32")]
+                                let picked_path = Some(std::path::PathBuf::from(&full_filename));
+                                #[cfg(not(target_arch = "wasm32"))]
+                                let picked_path = {
+                                    let mut dialog = rfd::FileDialog::new()
+                                        .set_file_name(&full_filename)
+                                        .add_filter(self.format.label(), &[self.format.extension()]);
+                                    if let Some(dir) = &self.target_directory {
+                                        dialog = dialog.set_directory(dir);
+                                    }
+                                    dialog.save_file()
+                                };
+                                if let Some(path) = picked_path {
+                                    result = Some(SaveAction {
+                                        path,
+                                        format: self.format,
+                                        quality: self.quality,
+                                        webp_lossless: self.webp_lossless,
+                                        tiff_compression: self.tiff_compression,
+                                        animated: self.animated && self.format.supports_animation(),
+                                        animation_fps: self.animation_fps,
+                                        gif_colors: self.gif_colors,
+                                        gif_dither: self.gif_dither,
+                                    });
+                                    should_close = true;
+                                }
+                            }
+                        });
+                    });
+                });
+        }
+
+        if should_close {
+            self.open = false;
+            self.anim_playing = false;
+            self.preview_texture = None;
+            self.frame_textures.clear();
+        }
+
+        result
+    }
+}

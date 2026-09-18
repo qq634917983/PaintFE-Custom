@@ -1,0 +1,79 @@
+name: Publish to AUR
+
+# Runs automatically after the Release workflow succeeds.
+# Publishes both paintfe (source build) and paintfe-bin (prebuilt binary) packages.
+# Requires three repository secrets — see packaging/aur/PKGBUILD comments and AUR_SETUP_GUIDE.md.
+#   AUR_SSH_PRIVATE_KEY  — private half of the AUR deploy SSH key
+#   AUR_USERNAME         — your AUR / git author username (e.g. kylejckson)
+#   AUR_EMAIL            — your AUR / git author email
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.1.13)"
+        required: true
+
+# Prevent duplicate/overlapping publishes for the same version.
+concurrency:
+  group: >-
+    aur-publish-${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+permissions: read-all
+
+jobs:
+  aur-publish:
+    name: Publish ${{ matrix.pkgname }} to AUR
+    runs-on: ubuntu-latest
+    # For workflow_run: only run when Release succeeded on a version tag.
+    # For workflow_dispatch: always run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pkgname: paintfe
+            pkgbuild_path: packaging/aur/PKGBUILD
+          - pkgname: paintfe-bin
+            pkgbuild_path: packaging/aur/PKGBUILD-bin
+
+    steps:
+      - name: Checkout at release commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.event.workflow_run.head_sha }}
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            TAG="${{ github.event.workflow_run.head_branch }}"
+            echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stamp version into PKGBUILD
+        run: |
+          sed -i "s/^pkgver=.*/pkgver=${{ steps.version.outputs.version }}/" ${{ matrix.pkgbuild_path }}
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050
+        with:
+          pkgname: ${{ matrix.pkgname }}
+          pkgbuild: ${{ matrix.pkgbuild_path }}
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "Update to v${{ steps.version.outputs.version }}"
+          updpkgsums: true
+          test: false
+          allow_empty_commits: false

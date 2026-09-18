@@ -1,0 +1,13 @@
+# Trunk config — see https://trunkrs.dev/configuration/
+#
+# Without this, trunk's own build output (`dist/`) sits inside the watched
+# `web/` directory, so every rebuild writes files that trigger the next
+# rebuild — an infinite self-triggering loop that made the dev server
+# reload constantly and destabilized live testing.
+[watch]
+ignore = ["dist", "target"]
+
+# The static site hosts the application beneath /online/. Keep generated WASM
+# and JavaScript URLs under that path instead of the domain root.
+[build]
+public_url = "/online/"

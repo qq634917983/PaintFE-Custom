@@ -1,0 +1,30 @@
+# Rust build output
+/target
+/dist
+/web/target
+/web/dist
+.DS_Store
+
+# Local website files
+_WEBSITE/
+
+# VS Code workspace file (contains local paths)
+PaintFE.code-workspace
+
+# Python virtual environment (auto-generated, never commit)
+.venv/
+
+# Windows debug symbols
+*.pdb
+
+# MSIX build output
+*.msix
+
+# Local-only HTML files
+*.local.html
+
+# Local-only web launcher
+/run-web.bat
+
+# Test failure artifacts (diffs, actual outputs)
+tests/output/

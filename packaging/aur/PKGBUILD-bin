@@ -1,0 +1,48 @@
+# Maintainer: Kyle Jackson <your@email.com>
+# paintfe-bin — installs the prebuilt Linux binary from the GitHub release.
+# Faster to install than paintfe (no Rust compile). x86_64 only.
+# Update pkgver + sha256sums for each new release.
+# Portable archive sha256 is in checksums-SHA256.txt attached to each GitHub release.
+
+pkgname=paintfe-bin
+pkgver=1.2.13
+pkgrel=1
+pkgdesc="Fast, GPU-accelerated raster image editor (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/kylejckson/PaintFE"
+license=('MIT')
+provides=('paintfe')
+conflicts=('paintfe')
+depends=(
+    'gcc-libs'
+    'glibc'
+    'libxkbcommon'
+    'wayland'
+    'libx11'
+)
+optdepends=(
+    'vulkan-icd-loader: hardware-accelerated GPU rendering (recommended)'
+    'mesa: software/OpenGL fallback rendering'
+)
+source=(
+    "PaintFE-linux-x64-${pkgver}.tar.gz::https://github.com/kylejckson/PaintFE/releases/download/v${pkgver}/PaintFE-linux-x64.tar.gz"
+    "PaintFE-${pkgver}.desktop::https://raw.githubusercontent.com/kylejckson/PaintFE/v${pkgver}/packaging/appimage/PaintFE.AppDir/PaintFE.desktop"
+    "PaintFE-${pkgver}.png::https://raw.githubusercontent.com/kylejckson/PaintFE/v${pkgver}/assets/icons/app_icon.png"
+    "LICENSE-${pkgver}.md::https://raw.githubusercontent.com/kylejckson/PaintFE/v${pkgver}/LICENSE.md"
+)
+sha256sums=(
+    'SKIP'  # Portable archive: get from checksums-SHA256.txt in the GitHub release
+    'SKIP'  # .desktop file
+    'SKIP'  # App icon
+    'SKIP'  # LICENSE
+)
+
+package() {
+    install -Dm755 "PaintFE-linux-x64/PaintFE"      "$pkgdir/usr/bin/PaintFE"
+    install -d "$pkgdir/usr/lib/paintfe/paintdotnet-host"
+    cp -a PaintFE-linux-x64/paintdotnet-host/. "$pkgdir/usr/lib/paintfe/paintdotnet-host/"
+    ln -s /usr/lib/paintfe/paintdotnet-host "$pkgdir/usr/bin/paintdotnet-host"
+    install -Dm644 "PaintFE-${pkgver}.desktop"      "$pkgdir/usr/share/applications/PaintFE.desktop"
+    install -Dm644 "PaintFE-${pkgver}.png"          "$pkgdir/usr/share/icons/hicolor/256x256/apps/PaintFE.png"
+    install -Dm644 "LICENSE-${pkgver}.md"           "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

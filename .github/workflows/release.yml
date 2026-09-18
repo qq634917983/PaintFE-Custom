@@ -1,0 +1,498 @@
+name: Release
+
+# Runs when you push a tag like v1.0.0
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: read-all
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Windows build ──────────────────────────────────────────────────────────
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build release
+        # .cargo/config.toml applies -C target-feature=+crt-static on Windows,
+        # statically linking vcruntime into the EXE — no external C++ dependency
+        # (satisfies Microsoft Store policy 10.2.4.1).
+        run: cargo build --release
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: |
+          dotnet restore paintdotnet-host/src/PaintFE.PaintDotNetHost/PaintFE.PaintDotNetHost.csproj --locked-mode
+          dotnet publish paintdotnet-host/src/PaintFE.PaintDotNetHost/PaintFE.PaintDotNetHost.csproj -c Release -r win-x64 --self-contained true --no-restore -m:1 -o target/release/paintdotnet-host
+          (Get-FileHash target/release/paintdotnet-host/PaintFE.PaintDotNetHost.exe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -NoNewline target/release/paintdotnet-host/PaintFE.PaintDotNetHost.exe.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-windows
+          path: |
+            target/release/PaintFE.exe
+            target/release/paintdotnet-host
+
+  # ── Linux build ────────────────────────────────────────────────────────────
+  build-linux:
+    name: Build (Linux)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libegl1-mesa-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: linux-cargo-
+
+      - name: Build release
+        run: cargo build --release
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: bash paintdotnet-host/publish.sh linux-x64 target/release/paintdotnet-host
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-linux
+          path: |
+            target/release/PaintFE
+            target/release/paintdotnet-host
+
+  # ── AppImage build ─────────────────────────────────────────────────────────
+  build-appimage:
+    name: Build (AppImage)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev \
+            libvulkan-dev \
+            libwayland-dev \
+            libegl1-mesa-dev \
+            libssl-dev \
+            libfuse2 \
+            pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: appimage-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: appimage-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: bash paintdotnet-host/publish.sh linux-x64
+
+      - name: Build AppImage
+        run: bash packaging/appimage/build-appimage.sh
+
+      - name: Upload AppImage artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-appimage
+          path: PaintFE-x86_64.AppImage
+
+  # ── macOS build (Apple Silicon — aarch64) ────────────────────────────────────
+  build-macos-arm:
+    name: Build (macOS Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-arm-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-arm-cargo-
+
+      - name: Build release
+        run: cargo build --release
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: bash paintdotnet-host/publish.sh osx-arm64
+
+      - name: Create .dmg
+        run: |
+          mkdir -p dmg_staging
+          cp target/release/PaintFE dmg_staging/
+          cp -R target/pdn-host/osx-arm64 dmg_staging/paintdotnet-host
+          chmod +x dmg_staging/PaintFE
+          chmod +x dmg_staging/paintdotnet-host/PaintFE.PaintDotNetHost
+          hdiutil create -volname "PaintFE" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            PaintFE-macOS-arm64.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-macos-arm64
+          path: PaintFE-macOS-arm64.dmg
+
+  # ── macOS build (Intel — x86_64) ──────────────────────────────────────────
+  build-macos-x86:
+    name: Build (macOS Intel)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+          targets: x86_64-apple-darwin
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-x86-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: macos-x86-cargo-
+
+      - name: Build release (cross-compile for Intel)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: bash paintdotnet-host/publish.sh osx-x64
+
+      - name: Create .dmg
+        run: |
+          mkdir -p dmg_staging
+          cp target/x86_64-apple-darwin/release/PaintFE dmg_staging/
+          cp -R target/pdn-host/osx-x64 dmg_staging/paintdotnet-host
+          chmod +x dmg_staging/PaintFE
+          chmod +x dmg_staging/paintdotnet-host/PaintFE.PaintDotNetHost
+          hdiutil create -volname "PaintFE" \
+            -srcfolder dmg_staging \
+            -ov -format UDZO \
+            PaintFE-macOS-x86_64.dmg
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-macos-x86_64
+          path: PaintFE-macOS-x86_64.dmg
+
+  # ── MSIX build (Microsoft Store submission package) ────────────────────────
+  # The package is uploaded to Partner Center by publish-microsoft-store below.
+  build-msix:
+    name: Build (MSIX / MS Store)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: 1.96.1
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: msix-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: msix-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          global-json-file: global.json
+
+      - name: Publish Paint.NET plugin host
+        run: |
+          dotnet restore paintdotnet-host/src/PaintFE.PaintDotNetHost/PaintFE.PaintDotNetHost.csproj --locked-mode
+          dotnet publish paintdotnet-host/src/PaintFE.PaintDotNetHost/PaintFE.PaintDotNetHost.csproj -c Release -r win-x64 --self-contained true --no-restore -m:1 -o target/release/paintdotnet-host
+          (Get-FileHash target/release/paintdotnet-host/PaintFE.PaintDotNetHost.exe -Algorithm SHA256).Hash.ToLowerInvariant() | Set-Content -NoNewline target/release/paintdotnet-host/PaintFE.PaintDotNetHost.exe.sha256
+
+      - name: Generate Store icon assets
+        shell: powershell
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          & packaging\msix\gen-assets.ps1
+
+      - name: Stage PackageLayout
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path packaging\msix\PackageLayout | Out-Null
+          Copy-Item target\release\PaintFE.exe packaging\msix\PackageLayout\
+          Copy-Item -Recurse -Force target\release\paintdotnet-host packaging\msix\PackageLayout\paintdotnet-host
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $ver = "$tag.0"
+          # Read raw bytes, strip UTF-8 BOM (EF BB BF) if present, decode, patch, re-encode, write
+          $bytes = [System.IO.File]::ReadAllBytes("$PWD\packaging\msix\AppxManifest.xml")
+          if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+            $bytes = $bytes[3..($bytes.Length - 1)]
+          }
+          $src = [System.Text.Encoding]::UTF8.GetString($bytes)
+          $src = $src -creplace '(?<=\s)Version="[\d.]+"', "Version=`"$ver`""
+          $outBytes = [System.Text.Encoding]::UTF8.GetBytes($src)
+          [System.IO.File]::WriteAllBytes("$PWD\packaging\msix\PackageLayout\AppxManifest.xml", $outBytes)
+          Copy-Item -Recurse -Force packaging\msix\assets packaging\msix\PackageLayout\assets
+
+      - name: Locate makeappx.exe
+        id: find_makeappx
+        run: |
+          $pf86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $exe = Get-ChildItem "$pf86\Windows Kits\10\bin" `
+            -Filter makeappx.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "x64" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $exe) { Write-Error "makeappx.exe not found"; exit 1 }
+          echo "path=$exe" >> $env:GITHUB_OUTPUT
+
+      - name: Pack MSIX
+        run: |
+          & "${{ steps.find_makeappx.outputs.path }}" `
+            pack /d packaging\msix\PackageLayout /p PaintFE.msix /nv
+
+      - name: Upload MSIX artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: PaintFE-msix-store-submission
+          path: PaintFE.msix
+          retention-days: 30
+
+  # ── Microsoft Store draft ─────────────────────────────────────────────────
+  # Protected by the GitHub "microsoft-store" environment. Keep --noCommit for
+  # the first run so the package can be inspected in Partner Center before it is
+  # submitted for certification.
+  publish-microsoft-store:
+    name: Create Microsoft Store Draft
+    needs: build-msix
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: windows-latest
+    environment: microsoft-store
+    permissions:
+      contents: read
+    steps:
+      - name: Download MSIX
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-msix-store-submission
+          path: store-package
+
+      - name: Install Microsoft Store Developer CLI
+        uses: microsoft/microsoft-store-apppublisher@v1.1
+
+      - name: Configure Partner Center access
+        shell: pwsh
+        env:
+          TENANT_ID: ${{ secrets.AZURE_AD_TENANT_ID }}
+          SELLER_ID: ${{ secrets.SELLER_ID }}
+          CLIENT_ID: ${{ secrets.AZURE_AD_APPLICATION_CLIENT_ID }}
+          CLIENT_SECRET: ${{ secrets.AZURE_AD_APPLICATION_SECRET }}
+        run: |
+          msstore reconfigure `
+            --tenantId "$env:TENANT_ID" `
+            --sellerId "$env:SELLER_ID" `
+            --clientId "$env:CLIENT_ID" `
+            --clientSecret "$env:CLIENT_SECRET"
+
+      - name: Upload Store draft
+        shell: pwsh
+        env:
+          STORE_PRODUCT_ID: ${{ vars.MS_STORE_PRODUCT_ID }}
+        run: |
+          msstore publish `
+            "${{ github.workspace }}\store-package\PaintFE.msix" `
+            --appId "$env:STORE_PRODUCT_ID" `
+            --noCommit
+
+  # ── Create GitHub Release ──────────────────────────────────────────────────
+  release:
+    name: Publish Release
+    needs: [build-windows, build-linux, build-appimage, build-macos-arm, build-macos-x86]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Windows binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-windows
+          path: dist/windows
+
+      - name: Download Linux binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-linux
+          path: dist/linux
+
+      - name: Download AppImage
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-appimage
+          path: dist/linux
+
+      - name: Download macOS ARM binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-macos-arm64
+          path: dist/macos
+
+      - name: Download macOS Intel binary
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: PaintFE-macos-x86_64
+          path: dist/macos
+
+      - name: Make binaries executable
+        run: |
+          chmod +x dist/linux/PaintFE
+          chmod +x dist/linux/PaintFE-x86_64.AppImage
+          chmod +x dist/linux/paintdotnet-host/PaintFE.PaintDotNetHost
+
+      - name: Package portable builds with Paint.NET host
+        run: |
+          cd dist
+          mkdir -p PaintFE-windows-x64 PaintFE-linux-x64
+          cp windows/PaintFE.exe PaintFE-windows-x64/
+          cp -R windows/paintdotnet-host PaintFE-windows-x64/paintdotnet-host
+          cp linux/PaintFE PaintFE-linux-x64/
+          cp -R linux/paintdotnet-host PaintFE-linux-x64/paintdotnet-host
+          zip -r PaintFE-windows-x64.zip PaintFE-windows-x64
+          tar -czf PaintFE-linux-x64.tar.gz PaintFE-linux-x64
+
+      - name: Generate SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum windows/PaintFE.exe \
+            windows/paintdotnet-host/PaintFE.PaintDotNetHost.exe \
+            windows/paintdotnet-host/PaintFE.PaintDotNetHost.exe.sha256 \
+            linux/PaintFE linux/PaintFE-x86_64.AppImage \
+            linux/paintdotnet-host/PaintFE.PaintDotNetHost \
+            linux/paintdotnet-host/PaintFE.PaintDotNetHost.sha256 \
+            PaintFE-windows-x64.zip PaintFE-linux-x64.tar.gz \
+            macos/PaintFE-macOS-arm64.dmg macos/PaintFE-macOS-x86_64.dmg \
+            | sed 's|windows/||; s|linux/||; s|macos/||' \
+            > checksums-SHA256.txt
+          cat checksums-SHA256.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@7c4723f7a335432393329f8f1c564994ce50185d
+        with:
+          name: PaintFE ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            dist/windows/PaintFE.exe
+            dist/linux/PaintFE
+            dist/linux/PaintFE-x86_64.AppImage
+            dist/PaintFE-windows-x64.zip
+            dist/PaintFE-linux-x64.tar.gz
+            dist/macos/PaintFE-macOS-arm64.dmg
+            dist/macos/PaintFE-macOS-x86_64.dmg
+            dist/checksums-SHA256.txt

@@ -1,0 +1,324 @@
+// =============================================================================
+// Integration tests — File I/O roundtrips
+// =============================================================================
+//
+// Tests save → load → compare for all supported image formats and PFE project
+// files. Each test writes to a temp directory and verifies the loaded result
+// matches the original within a format-appropriate tolerance.
+
+mod common;
+
+use common::*;
+use image::{Rgba, RgbaImage};
+use paintfe::canvas::{CanvasState, Layer, LayerFolder, TiledImage, WebpFrameCompression};
+use paintfe::components::dialogs::{SaveFormat, TiffCompression};
+use paintfe::io::{
+    decode_webp_frames, encode_and_write, encode_animated_webp, load_image_sync, load_pfe, save_pfe,
+};
+use std::path::PathBuf;
+
+/// Temp directory for this test run, auto-cleaned.
+fn temp_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join("paintfe_io_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Standard 64×64 test image with full color range.
+fn test_image() -> RgbaImage {
+    create_test_gradient(64, 64)
+}
+
+/// Helper: save an image, load it back, return the loaded composite.
+fn roundtrip_format(img: &RgbaImage, name: &str, format: SaveFormat, quality: u8, tolerance: u8) {
+    let path = temp_dir().join(name);
+    encode_and_write(img, &path, format, quality, TiffCompression::None, true).unwrap();
+
+    let loaded_state = load_image_sync(&path).unwrap();
+    let loaded = loaded_state.composite();
+
+    let diff = compare_images(&loaded, img, tolerance);
+    assert!(
+        diff.matches,
+        "{}: roundtrip failed — max channel diff = {}, mismatched = {}/{} ({:.2}%)",
+        name,
+        diff.max_channel_diff,
+        diff.mismatched_pixels,
+        diff.total_pixels,
+        diff.mismatch_percentage,
+    );
+
+    // Clean up
+    let _ = std::fs::remove_file(&path);
+}
+
+// =============================================================================
+// Lossless formats (pixel-exact roundtrip)
+// =============================================================================
+
+#[test]
+fn roundtrip_png() {
+    roundtrip_format(&test_image(), "rt.png", SaveFormat::Png, 95, 0);
+}
+
+#[test]
+fn roundtrip_bmp() {
+    roundtrip_format(&test_image(), "rt.bmp", SaveFormat::Bmp, 95, 0);
+}
+
+#[test]
+fn roundtrip_tga() {
+    roundtrip_format(&test_image(), "rt.tga", SaveFormat::Tga, 95, 0);
+}
+
+#[test]
+fn roundtrip_tiff() {
+    roundtrip_format(&test_image(), "rt.tiff", SaveFormat::Tiff, 95, 0);
+}
+
+// =============================================================================
+// Lossy formats (tolerance needed)
+// =============================================================================
+
+#[test]
+fn roundtrip_jpeg() {
+    // JPEG is lossy — allow up to 10 per-channel difference at q95
+    roundtrip_format(&test_image(), "rt.jpg", SaveFormat::Jpeg, 95, 10);
+}
+
+#[test]
+fn roundtrip_webp() {
+    roundtrip_format(&test_image(), "rt.webp", SaveFormat::Webp, 95, 0);
+}
+
+#[test]
+fn roundtrip_webp_lossy_decodes() {
+    let img = test_image();
+    let path = temp_dir().join("rt_lossy.webp");
+    encode_and_write(
+        &img,
+        &path,
+        SaveFormat::Webp,
+        75,
+        TiffCompression::None,
+        false,
+    )
+    .unwrap();
+    let loaded = load_image_sync(&path).unwrap().composite();
+    assert_eq!(loaded.dimensions(), img.dimensions());
+    let _ = std::fs::remove_file(&path);
+}
+
+// =============================================================================
+// GIF (quantized to 256 colors)
+// =============================================================================
+
+#[test]
+fn roundtrip_gif() {
+    // GIF quantizes to 256 palette — allow wide tolerance
+    roundtrip_format(&test_image(), "rt.gif", SaveFormat::Gif, 95, 55);
+}
+
+// =============================================================================
+// PFE project file (layer-preserving roundtrip)
+// =============================================================================
+
+#[test]
+fn roundtrip_pfe_single_layer() {
+    let img = test_image();
+    let state = canvas_from_image(&img);
+    let path = temp_dir().join("rt_single.pfe");
+
+    save_pfe(&state, &path).unwrap();
+    let loaded = load_pfe(&path).unwrap();
+
+    assert_eq!(loaded.layers.len(), 1);
+    assert_eq!(loaded.width, state.width);
+    assert_eq!(loaded.height, state.height);
+
+    let original_px = extract_layer(&state, 0);
+    let loaded_px = extract_layer(&loaded, 0);
+    assert_eq!(
+        original_px, loaded_px,
+        "PFE single layer should be pixel-exact"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn roundtrip_pfe_multi_layer() {
+    let w = 64;
+    let h = 64;
+
+    let mut state = CanvasState::new(w, h);
+    // Layer 0: white background (already created)
+
+    // Layer 1: red semi-transparent overlay
+    let mut red_img = RgbaImage::new(w, h);
+    for p in red_img.pixels_mut() {
+        *p = Rgba([255, 0, 0, 128]);
+    }
+    let mut layer1 = Layer::new("Red".into(), w, h, Rgba([0, 0, 0, 0]));
+    layer1.pixels = TiledImage::from_rgba_image(&red_img);
+    layer1.opacity = 0.75;
+    state.layers.push(layer1);
+
+    // Layer 2: gradient
+    let grad = create_test_gradient(w, h);
+    let mut layer2 = Layer::new("Gradient".into(), w, h, Rgba([0, 0, 0, 0]));
+    layer2.pixels = TiledImage::from_rgba_image(&grad);
+    state.layers.push(layer2);
+
+    let path = temp_dir().join("rt_multi.pfe");
+    save_pfe(&state, &path).unwrap();
+    let loaded = load_pfe(&path).unwrap();
+
+    assert_eq!(loaded.layers.len(), 3, "should preserve all 3 layers");
+    assert_eq!(loaded.layers[1].opacity, 0.75);
+    assert_eq!(loaded.layers[1].name, "Red");
+    assert_eq!(loaded.layers[2].name, "Gradient");
+
+    // Composite should match
+    let original_comp = state.composite();
+    let loaded_comp = loaded.composite();
+    assert_eq!(
+        original_comp, loaded_comp,
+        "PFE composite should be pixel-exact"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn roundtrip_pfe_layer_folders() {
+    let w = 16;
+    let h = 16;
+    let mut state = CanvasState::new(w, h);
+    state.layer_folders.push(LayerFolder {
+        id: 7,
+        name: "Paint group".into(),
+        visible: false,
+        collapsed: true,
+        insert_above_layer: None,
+        color_index: Some(2),
+    });
+    state.next_layer_folder_id = 8;
+
+    let mut layer = Layer::new("Grouped".into(), w, h, Rgba([0, 0, 0, 0]));
+    layer.folder_id = Some(7);
+    layer.pixels =
+        TiledImage::from_rgba_image(&RgbaImage::from_pixel(w, h, Rgba([255, 0, 0, 255])));
+    state.layers.push(layer);
+
+    let path = temp_dir().join("rt_folders.pfe");
+    save_pfe(&state, &path).unwrap();
+    let loaded = load_pfe(&path).unwrap();
+
+    assert_eq!(loaded.layer_folders.len(), 1);
+    assert_eq!(loaded.layer_folders[0].id, 7);
+    assert_eq!(loaded.layer_folders[0].name, "Paint group");
+    assert!(!loaded.layer_folders[0].visible);
+    assert!(loaded.layer_folders[0].collapsed);
+    assert_eq!(loaded.layer_folders[0].color_index, Some(2));
+    assert_eq!(loaded.next_layer_folder_id, 8);
+    assert_eq!(loaded.layers[1].folder_id, Some(7));
+    assert!(!loaded.layer_effectively_visible(1));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn roundtrip_pfe_blend_modes() {
+    use paintfe::canvas::BlendMode;
+
+    let w = 32;
+    let h = 32;
+    let mut state = CanvasState::new(w, h);
+
+    let mut overlay = Layer::new("Multiply".into(), w, h, Rgba([0, 0, 0, 0]));
+    overlay.blend_mode = BlendMode::Multiply;
+    let img = create_test_gradient(w, h);
+    overlay.pixels = TiledImage::from_rgba_image(&img);
+    state.layers.push(overlay);
+
+    let path = temp_dir().join("rt_blend.pfe");
+    save_pfe(&state, &path).unwrap();
+    let loaded = load_pfe(&path).unwrap();
+
+    assert_eq!(loaded.layers[1].blend_mode, BlendMode::Multiply);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn roundtrip_pfe_webp_frame_compression() {
+    let mut state = canvas_from_image(&test_image());
+    state.layers[0].webp_frame_compression = WebpFrameCompression::Lossy;
+    let path = temp_dir().join("rt_webp_frame_mode.pfe");
+
+    save_pfe(&state, &path).unwrap();
+    let loaded = load_pfe(&path).unwrap();
+
+    assert_eq!(
+        loaded.layers[0].webp_frame_compression,
+        WebpFrameCompression::Lossy
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn animated_webp_roundtrip_frames() {
+    let frame_a = RgbaImage::from_pixel(16, 16, Rgba([255, 0, 0, 255]));
+    let frame_b = RgbaImage::from_pixel(16, 16, Rgba([0, 255, 0, 255]));
+    let frames = vec![frame_a, frame_b];
+    let modes = vec![WebpFrameCompression::Lossless, WebpFrameCompression::Lossy];
+    let path = temp_dir().join("rt_anim.webp");
+
+    encode_animated_webp(&frames, &modes, 10.0, 80, &path).unwrap();
+    let decoded = decode_webp_frames(&path).unwrap();
+
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(decoded[0].0.dimensions(), (16, 16));
+    assert_eq!(decoded[1].0.dimensions(), (16, 16));
+    let _ = std::fs::remove_file(&path);
+}
+
+// =============================================================================
+// load_image_sync dispatch
+// =============================================================================
+
+#[test]
+fn load_png_via_load_image_sync() {
+    let img = test_image();
+    let path = temp_dir().join("load_test.png");
+    encode_and_write(
+        &img,
+        &path,
+        SaveFormat::Png,
+        95,
+        TiffCompression::None,
+        true,
+    )
+    .unwrap();
+
+    let state = load_image_sync(&path).unwrap();
+    assert_eq!(state.width, 64);
+    assert_eq!(state.height, 64);
+    assert_eq!(state.layers.len(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn load_pfe_via_load_image_sync() {
+    let state = canvas_from_image(&test_image());
+    let path = temp_dir().join("load_test.pfe");
+    save_pfe(&state, &path).unwrap();
+
+    let loaded = load_image_sync(&path).unwrap();
+    assert_eq!(loaded.width, 64);
+    assert_eq!(loaded.height, 64);
+
+    let _ = std::fs::remove_file(&path);
+}

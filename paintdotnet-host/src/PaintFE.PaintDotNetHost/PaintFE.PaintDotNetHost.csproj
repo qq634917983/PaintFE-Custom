@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><AssemblyName>PaintFE.PaintDotNetHost</AssemblyName></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Formats.Nrbf" Version="10.0.0" />
+    <PackageReference Include="System.Reflection.Metadata" Version="10.0.0" />
+    <ProjectReference Include="../PaintDotNet.Base/PaintDotNet.Base.csproj" />
+    <ProjectReference Include="../PaintDotNet.Core/PaintDotNet.Core.csproj" />
+    <ProjectReference Include="../PaintDotNet.Data/PaintDotNet.Data.csproj" />
+    <ProjectReference Include="../PaintDotNet.Effects/PaintDotNet.Effects.csproj" />
+  </ItemGroup>
+</Project>

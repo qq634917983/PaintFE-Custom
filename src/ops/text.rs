@@ -1,0 +1,1046 @@
+use ab_glyph::{Font, FontArc, GlyphId, ScaleFont, point};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+
+/// Cache for rasterized glyph pixel data.
+/// Key: (font identity, GlyphId, font_size_bits, width_scale_bits, height_scale_bits).
+/// Value: (pixels as (u32, u32, f32), bounds_min_x_at_origin_zero, bounds_min_y_at_origin_zero).
+type GlyphPixelCacheKey = (u64, GlyphId, u32, u32, u32);
+type GlyphPixelCacheValue = (Vec<(u32, u32, f32)>, f32, f32);
+pub type GlyphPixelCache = HashMap<GlyphPixelCacheKey, GlyphPixelCacheValue>;
+
+pub fn font_cache_key(family: &str, weight: u16, italic: bool) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    family.hash(&mut hasher);
+    weight.hash(&mut hasher);
+    italic.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Text alignment options.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextAlignment {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlignment {
+    pub fn label(&self) -> String {
+        match self {
+            TextAlignment::Left => t!("text_alignment.left"),
+            TextAlignment::Center => t!("text_alignment.center"),
+            TextAlignment::Right => t!("text_alignment.right"),
+        }
+    }
+}
+
+/// A positioned glyph ready for rasterization.
+struct LayoutGlyph {
+    id: GlyphId,
+    x: f32,
+    y: f32,
+    scale: f32,
+}
+
+/// Lay out a single line of text, returning positioned glyphs and bounding rect.
+/// Returns `(glyphs, total_width, ascent, descent, line_height)`.
+pub fn layout_text(
+    font: &FontArc,
+    text: &str,
+    font_size: f32,
+    alignment: TextAlignment,
+    letter_spacing: f32,
+    width_scale: f32,
+    height_scale: f32,
+) -> (Vec<(GlyphId, f32, f32)>, f32, f32, f32, f32) {
+    let safe_ws = width_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let safe_hs = height_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let scaled = font.as_scaled(ab_glyph::PxScale {
+        x: font_size * safe_ws,
+        y: font_size * safe_hs,
+    });
+    let ascent = scaled.ascent();
+    let descent = scaled.descent();
+    let line_height = scaled.height();
+
+    // First pass: compute glyph positions (left-aligned at x=0)
+    let mut glyphs = Vec::new();
+    let mut cursor_x = 0.0f32;
+    let mut last_glyph: Option<GlyphId> = None;
+
+    for ch in text.chars() {
+        let glyph_id = font.glyph_id(ch);
+        if let Some(prev) = last_glyph {
+            cursor_x += scaled.kern(prev, glyph_id);
+            cursor_x += letter_spacing;
+        }
+        glyphs.push((glyph_id, cursor_x, ascent));
+        cursor_x += scaled.h_advance(glyph_id);
+        last_glyph = Some(glyph_id);
+    }
+
+    let total_width = cursor_x;
+
+    // Apply alignment offset
+    let offset = match alignment {
+        TextAlignment::Left => 0.0,
+        TextAlignment::Center => -total_width * 0.5,
+        TextAlignment::Right => -total_width,
+    };
+
+    for glyph in &mut glyphs {
+        glyph.1 += offset;
+    }
+
+    (glyphs, total_width, ascent, descent, line_height)
+}
+
+/// Result from rasterize_text including cursor metrics for overlay rendering.
+pub struct RasterizedText {
+    pub buf: Vec<u8>,
+    pub buf_w: u32,
+    pub buf_h: u32,
+    pub off_x: i32,
+    pub off_y: i32,
+    /// Per-line cumulative advance widths for cursor positioning.
+    /// Maps (line_index, char_count_in_line) -> x_advance from line start.
+    pub line_advances: Vec<Vec<f32>>,
+    pub line_height: f32,
+}
+
+/// Lightweight layout-only metrics (no pixel rasterization).
+/// Used for cursor positioning and overlay drawing during text layer editing.
+pub struct TextLayoutMetrics {
+    pub line_advances: Vec<Vec<f32>>,
+    pub line_height: f32,
+}
+
+static SYSTEM_FONT_FAMILIES: OnceLock<Vec<String>> = OnceLock::new();
+static PREFERRED_DEFAULT_FONT_FAMILY: OnceLock<String> = OnceLock::new();
+
+fn matches_font_family(candidate: &str, requested: &str) -> bool {
+    candidate.eq_ignore_ascii_case(requested)
+}
+
+fn pick_preferred_font_family(families: &[String]) -> String {
+    #[cfg(target_os = "windows")]
+    const PREFERRED: &[&str] = &["Segoe UI", "Arial", "Tahoma", "Verdana", "Noto Sans"];
+    #[cfg(target_os = "macos")]
+    const PREFERRED: &[&str] = &[
+        "SF Pro",
+        "Helvetica Neue",
+        "Helvetica",
+        "Arial",
+        "Noto Sans",
+    ];
+    #[cfg(target_os = "linux")]
+    const PREFERRED: &[&str] = &[
+        "Noto Sans",
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Ubuntu",
+        "Cantarell",
+        "Arial",
+    ];
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    const PREFERRED: &[&str] = &["Noto Sans", "Arial", "DejaVu Sans", "Liberation Sans"];
+
+    for preferred in PREFERRED {
+        if let Some(found) = families
+            .iter()
+            .find(|family| matches_font_family(family, preferred))
+        {
+            return found.clone();
+        }
+    }
+
+    families
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "Arial".to_string())
+}
+
+pub fn cached_system_fonts() -> &'static [String] {
+    SYSTEM_FONT_FAMILIES
+        .get_or_init(enumerate_system_fonts)
+        .as_slice()
+}
+
+pub fn preferred_default_font_family() -> String {
+    PREFERRED_DEFAULT_FONT_FAMILY
+        .get_or_init(|| pick_preferred_font_family(cached_system_fonts()))
+        .clone()
+}
+
+pub fn resolve_font_family_preference(family: &str) -> String {
+    let requested = family.trim();
+    if !requested.is_empty()
+        && let Some(found) = cached_system_fonts()
+            .iter()
+            .find(|candidate| matches_font_family(candidate, requested))
+    {
+        return found.clone();
+    }
+    preferred_default_font_family()
+}
+
+/// Compute only layout metrics (line advances + line height) without rasterizing pixels.
+/// Much cheaper than `rasterize_text` — only reads font metrics.
+pub fn compute_text_layout_metrics(
+    font: &FontArc,
+    text: &str,
+    font_size: f32,
+    max_width: Option<f32>,
+    letter_spacing: f32,
+    line_spacing: f32,
+    width_scale: f32,
+    height_scale: f32,
+) -> TextLayoutMetrics {
+    use ab_glyph::{Font as _, ScaleFont as _};
+    let safe_ws = width_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let safe_hs = height_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let scaled = font.as_scaled(ab_glyph::PxScale {
+        x: font_size * safe_ws,
+        y: font_size * safe_hs,
+    });
+    let base_line_height = scaled.height();
+    let line_height = base_line_height * line_spacing;
+
+    let explicit_lines: Vec<&str> = text.split('\n').collect();
+    let visual_lines: Vec<String> = if let Some(mw) = max_width {
+        explicit_lines
+            .iter()
+            .flat_map(|line| {
+                word_wrap_line(
+                    line,
+                    font,
+                    font_size,
+                    mw,
+                    letter_spacing,
+                    width_scale,
+                    height_scale,
+                )
+            })
+            .collect()
+    } else {
+        explicit_lines.iter().map(|s| s.to_string()).collect()
+    };
+
+    let mut line_advances = Vec::with_capacity(visual_lines.len());
+    for line in &visual_lines {
+        let mut advances = Vec::with_capacity(line.chars().count() + 1);
+        advances.push(0.0f32);
+        let mut cursor_x = 0.0f32;
+        let mut prev_glyph: Option<ab_glyph::GlyphId> = None;
+        for ch in line.chars() {
+            let gid = font.glyph_id(ch);
+            if let Some(prev) = prev_glyph {
+                cursor_x += scaled.kern(prev, gid);
+                cursor_x += letter_spacing;
+            }
+            cursor_x += scaled.h_advance(gid);
+            advances.push(cursor_x);
+            prev_glyph = Some(gid);
+        }
+        line_advances.push(advances);
+    }
+
+    TextLayoutMetrics {
+        line_advances,
+        line_height,
+    }
+}
+
+/// Rasterize text glyphs into an RGBA buffer.
+///
+/// `origin` is the (x, y) position in canvas coordinates where the text baseline starts.
+/// Supports multiline text via '\n' characters.
+/// `coverage_buf` is an optional reusable buffer to avoid per-call allocation.
+/// Word-wrap a single line of text at word boundaries to fit within `max_width`.
+/// Returns a vector of sub-lines (string slices as byte ranges).
+pub fn word_wrap_line(
+    line: &str,
+    font: &FontArc,
+    font_size: f32,
+    max_width: f32,
+    letter_spacing: f32,
+    width_scale: f32,
+    height_scale: f32,
+) -> Vec<String> {
+    if line.is_empty() {
+        return vec![String::new()];
+    }
+    let safe_ws = width_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let safe_hs = height_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let scaled = font.as_scaled(ab_glyph::PxScale {
+        x: font_size * safe_ws,
+        y: font_size * safe_hs,
+    });
+
+    // Measure the full line width first as a fast path
+    let full_width = {
+        let mut w = 0.0f32;
+        let mut prev: Option<GlyphId> = None;
+        for ch in line.chars() {
+            let gid = font.glyph_id(ch);
+            if let Some(p) = prev {
+                w += scaled.kern(p, gid);
+                w += letter_spacing;
+            }
+            w += scaled.h_advance(gid);
+            prev = Some(gid);
+        }
+        w
+    };
+    if full_width <= max_width {
+        return vec![line.to_string()];
+    }
+
+    // Split into word segments (preserving whitespace boundaries)
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0.0f32;
+    let mut prev_glyph: Option<GlyphId> = None;
+
+    // Iterate character by character, breaking at word boundaries
+    let chars: Vec<char> = line.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // Find the next word (sequence of non-space chars) or space run
+        let is_space = chars[i].is_whitespace();
+        let seg_start = i;
+        while i < chars.len() && chars[i].is_whitespace() == is_space {
+            i += 1;
+        }
+        let segment: String = chars[seg_start..i].iter().collect();
+
+        // Measure this segment
+        let mut seg_width = 0.0f32;
+        let mut seg_prev = prev_glyph;
+        for ch in segment.chars() {
+            let gid = font.glyph_id(ch);
+            if let Some(p) = seg_prev {
+                seg_width += scaled.kern(p, gid);
+                seg_width += letter_spacing;
+            }
+            seg_width += scaled.h_advance(gid);
+            seg_prev = Some(gid);
+        }
+
+        if current_width + seg_width <= max_width || current_line.is_empty() {
+            // Fits on current line, OR first segment on line.
+            // If this is the first segment and it's a non-space word that exceeds
+            // max_width, break it character-by-character.
+            if current_line.is_empty() && !is_space && seg_width > max_width {
+                // Character-level wrapping for oversized words
+                let mut char_line = String::new();
+                let mut char_w = 0.0f32;
+                let mut char_prev: Option<GlyphId> = None;
+                for ch in segment.chars() {
+                    let gid = font.glyph_id(ch);
+                    let mut ch_advance = scaled.h_advance(gid);
+                    if let Some(p) = char_prev {
+                        ch_advance += scaled.kern(p, gid) + letter_spacing;
+                    }
+                    if char_w + ch_advance > max_width && !char_line.is_empty() {
+                        result.push(char_line);
+                        char_line = String::new();
+                        // Re-measure without kerning from previous
+                        let ch_advance_fresh = scaled.h_advance(gid);
+                        char_line.push(ch);
+                        char_w = ch_advance_fresh;
+                        char_prev = Some(gid);
+                    } else {
+                        char_line.push(ch);
+                        char_w += ch_advance;
+                        char_prev = Some(gid);
+                    }
+                }
+                // Remaining chars become the current_line for further segments
+                current_line = char_line;
+                current_width = char_w;
+                prev_glyph = char_prev;
+            } else {
+                current_line.push_str(&segment);
+                current_width += seg_width;
+                prev_glyph = seg_prev;
+            }
+        } else {
+            // Doesn't fit — start a new line
+            // Trim trailing whitespace from current line
+            let trimmed = current_line.trim_end().to_string();
+            result.push(trimmed);
+            // Start new line with this segment (skip leading whitespace)
+            if is_space {
+                current_line = String::new();
+                current_width = 0.0;
+                prev_glyph = None;
+            } else {
+                // Check if this non-space segment itself exceeds max_width
+                if seg_width > max_width {
+                    // Character-level wrapping
+                    let mut char_line = String::new();
+                    let mut char_w = 0.0f32;
+                    let mut char_prev: Option<GlyphId> = None;
+                    for ch in segment.chars() {
+                        let gid = font.glyph_id(ch);
+                        let mut ch_advance = scaled.h_advance(gid);
+                        if let Some(p) = char_prev {
+                            ch_advance += scaled.kern(p, gid) + letter_spacing;
+                        }
+                        if char_w + ch_advance > max_width && !char_line.is_empty() {
+                            result.push(char_line);
+                            char_line = String::new();
+                            let ch_advance_fresh = scaled.h_advance(gid);
+                            char_line.push(ch);
+                            char_w = ch_advance_fresh;
+                            char_prev = Some(gid);
+                        } else {
+                            char_line.push(ch);
+                            char_w += ch_advance;
+                            char_prev = Some(gid);
+                        }
+                    }
+                    current_line = char_line;
+                    current_width = char_w;
+                    prev_glyph = char_prev;
+                } else {
+                    current_line = segment;
+                    current_width = seg_width;
+                    prev_glyph = seg_prev;
+                }
+            }
+        }
+    }
+
+    // Push remaining text
+    if !current_line.is_empty() || result.is_empty() {
+        result.push(current_line.trim_end().to_string());
+    }
+
+    result
+}
+
+pub fn rasterize_text(
+    font: &FontArc,
+    font_cache_key: u64,
+    text: &str,
+    font_size: f32,
+    alignment: TextAlignment,
+    origin_x: f32,
+    origin_y: f32,
+    color: [u8; 4],
+    anti_alias: bool,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strikethrough: bool,
+    _canvas_w: u32,
+    _canvas_h: u32,
+    coverage_buf: &mut Vec<f32>,
+    glyph_cache: &mut GlyphPixelCache,
+    max_width: Option<f32>,
+    letter_spacing: f32,
+    line_spacing: f32,
+    width_scale: f32,
+    height_scale: f32,
+) -> RasterizedText {
+    // Clamp scale to prevent inf/NaN from propagating (e.g. from extreme DragValue input).
+    // f32::MAX / font_size ensures the product stays finite.
+    let safe_ws = width_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let safe_hs = height_scale.clamp(0.001, f32::MAX / font_size.max(1.0));
+    let scaled = font.as_scaled(ab_glyph::PxScale {
+        x: font_size * safe_ws,
+        y: font_size * safe_hs,
+    });
+    let ascent = scaled.ascent();
+    let base_line_height = scaled.height();
+    let line_height = base_line_height * line_spacing;
+
+    // Split text into lines by explicit newlines, then apply word wrapping
+    let explicit_lines: Vec<&str> = text.split('\n').collect();
+    let visual_lines: Vec<String> = if let Some(mw) = max_width {
+        explicit_lines
+            .iter()
+            .flat_map(|line| {
+                word_wrap_line(
+                    line,
+                    font,
+                    font_size,
+                    mw,
+                    letter_spacing,
+                    width_scale,
+                    height_scale,
+                )
+            })
+            .collect()
+    } else {
+        explicit_lines.iter().map(|s| s.to_string()).collect()
+    };
+
+    let mut all_glyphs: Vec<(GlyphId, f32, f32)> = Vec::new();
+    let mut line_widths: Vec<f32> = Vec::new();
+    let mut line_advances: Vec<Vec<f32>> = Vec::new();
+
+    for (line_idx, line) in visual_lines.iter().enumerate() {
+        let y_offset = line_idx as f32 * line_height;
+        let (mut glyphs, total_width, _, _, _) = layout_text(
+            font,
+            line,
+            font_size,
+            alignment,
+            letter_spacing,
+            width_scale,
+            height_scale,
+        );
+        // Offset y positions for this line
+        for glyph in &mut glyphs {
+            glyph.2 += y_offset;
+        }
+        // Compute cumulative advances for cursor positioning
+        let mut advances = Vec::with_capacity(line.chars().count() + 1);
+        advances.push(0.0f32);
+        let mut cursor_x = 0.0f32;
+        let mut prev_glyph: Option<GlyphId> = None;
+        for ch in line.chars() {
+            let gid = font.glyph_id(ch);
+            if let Some(prev) = prev_glyph {
+                cursor_x += scaled.kern(prev, gid);
+                cursor_x += letter_spacing;
+            }
+            cursor_x += scaled.h_advance(gid);
+            advances.push(cursor_x);
+            prev_glyph = Some(gid);
+        }
+        line_advances.push(advances);
+        all_glyphs.extend(glyphs);
+        line_widths.push(total_width);
+    }
+
+    if all_glyphs.is_empty() && !underline && !strikethrough {
+        return RasterizedText {
+            buf: Vec::new(),
+            buf_w: 0,
+            buf_h: 0,
+            off_x: 0,
+            off_y: 0,
+            line_advances,
+            line_height,
+        };
+    }
+
+    // Compute bounding box of all glyphs using actual outline bounds.
+    // glyph_bounds() returns the font's *declared* metrics which can be too
+    // tight for decorative/display fonts — outline_glyph().px_bounds() gives
+    // the real pixel coverage.  Fall back to glyph_bounds() for glyphs that
+    // have no outline (e.g. space).
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+
+    for &(glyph_id, gx, gy) in &all_glyphs {
+        let glyph = glyph_id.with_scale_and_position(
+            ab_glyph::PxScale {
+                x: font_size * width_scale,
+                y: font_size * height_scale,
+            },
+            point(gx, gy),
+        );
+        if let Some(outlined) = font.outline_glyph(glyph.clone()) {
+            let ob = outlined.px_bounds();
+            min_x = min_x.min(ob.min.x);
+            min_y = min_y.min(ob.min.y);
+            max_x = max_x.max(ob.max.x);
+            max_y = max_y.max(ob.max.y);
+        } else {
+            let bounds = font.glyph_bounds(&glyph);
+            min_x = min_x.min(bounds.min.x);
+            min_y = min_y.min(bounds.min.y);
+            max_x = max_x.max(bounds.max.x);
+            max_y = max_y.max(bounds.max.y);
+        }
+    }
+
+    // Handle decorations (extend bounds per line)
+    if underline || strikethrough {
+        for (line_idx, &line_w) in line_widths.iter().enumerate() {
+            let align_offset = match alignment {
+                TextAlignment::Left => 0.0,
+                TextAlignment::Center => -line_w * 0.5,
+                TextAlignment::Right => -line_w,
+            };
+            min_x = min_x.min(align_offset);
+            max_x = max_x.max(align_offset + line_w);
+            let y_off = line_idx as f32 * line_height;
+            min_y = min_y.min(y_off);
+            max_y = max_y.max(y_off + ascent + font_size * 0.2);
+        }
+    }
+
+    // If we only have empty lines (no glyphs, no decorations with width), bail
+    if min_x >= max_x || min_y >= max_y {
+        return RasterizedText {
+            buf: Vec::new(),
+            buf_w: 0,
+            buf_h: 0,
+            off_x: 0,
+            off_y: 0,
+            line_advances,
+            line_height,
+        };
+    }
+
+    // Add padding — scale with font size so decorative/display fonts with
+    // wide swashes or overhanging serifs are not clipped at the edges.
+    let pad = (font_size * 0.15).max(2.0);
+    min_x -= pad;
+    min_y -= pad;
+    max_x += pad;
+    max_y += pad;
+
+    // Convert to canvas space
+    let buf_x0 = (origin_x + min_x).floor() as i32;
+    let buf_y0 = (origin_y + min_y).floor() as i32;
+    let buf_x1 = (origin_x + max_x).ceil() as i32;
+    let buf_y1 = (origin_y + max_y).ceil() as i32;
+
+    // Preserve the full text bounds, even when part of the preview lies
+    // outside the canvas. The later blit step clips to the canvas, but
+    // keeping the complete buffer here prevents off-canvas glyphs from being
+    // discarded before the anchor is moved back into view.
+    let x0 = buf_x0;
+    let y0 = buf_y0;
+    let x1 = buf_x1;
+    let y1 = buf_y1;
+    let buf_w = (x1 - x0).max(0) as u32;
+    let buf_h = (y1 - y0).max(0) as u32;
+
+    if buf_w == 0 || buf_h == 0 {
+        return RasterizedText {
+            buf: Vec::new(),
+            buf_w: 0,
+            buf_h: 0,
+            off_x: 0,
+            off_y: 0,
+            line_advances,
+            line_height,
+        };
+    }
+
+    // Reuse coverage buffer (single channel)
+    let needed = buf_w as usize * buf_h as usize;
+    coverage_buf.resize(needed, 0.0);
+    coverage_buf[..needed].fill(0.0);
+
+    // Rasterize each glyph using glyph pixel cache (Opt 4)
+    // Glyphs are cached at position (0,0) — we shift the cached pixels by the actual glyph position.
+    let font_size_key = font_size.to_bits();
+    let width_scale_key = width_scale.to_bits();
+    let height_scale_key = height_scale.to_bits();
+    for &(glyph_id, gx, gy) in &all_glyphs {
+        let draw_x = gx.round();
+        let draw_y = gy.round();
+        let cache_key = (
+            font_cache_key,
+            glyph_id,
+            font_size_key,
+            width_scale_key,
+            height_scale_key,
+        );
+
+        // Populate cache if this glyph hasn't been rasterized yet
+        glyph_cache.entry(cache_key).or_insert_with(|| {
+            let base_glyph = glyph_id.with_scale_and_position(
+                ab_glyph::PxScale {
+                    x: font_size * width_scale,
+                    y: font_size * height_scale,
+                },
+                point(0.0, 0.0),
+            );
+            let mut px_list = Vec::new();
+            let (bx, by) = if let Some(outlined) = font.outline_glyph(base_glyph) {
+                let b = outlined.px_bounds();
+                outlined.draw(|px, py, cov| {
+                    px_list.push((px, py, cov));
+                });
+                (b.min.x, b.min.y)
+            } else {
+                (0.0, 0.0)
+            };
+            (px_list, bx, by)
+        });
+
+        // Replay cached glyph pixels at actual position
+        if let Some((pixels, base_bx, base_by)) = glyph_cache.get(&cache_key) {
+            // key is (GlyphId, font_size, width_scale, height_scale) bits
+            let actual_bx = *base_bx + draw_x;
+            let actual_by = *base_by + draw_y;
+            // Synthetic italic: shear pixels horizontally relative to this
+            // glyph's baseline. There's no real italic font file to fall
+            // back to on web (no OS font store to search for a slanted
+            // variant), so this is the only way italic ever looks different
+            // there — matched here rather than only gating it to wasm32
+            // since it's a reasonable fallback everywhere a family has no
+            // true italic face.
+            const ITALIC_SHEAR: f32 = 0.2;
+            let baseline_y = origin_y + draw_y;
+
+            for &(px, py, cov) in pixels.iter() {
+                let cx = px as f32 + origin_x + actual_bx;
+                let cy = py as f32 + origin_y + actual_by;
+                let cx = if italic {
+                    cx + (baseline_y - cy) * ITALIC_SHEAR
+                } else {
+                    cx
+                };
+
+                let ix = cx.round() as i32 - x0;
+                let iy = cy.round() as i32 - y0;
+                if ix >= 0 && iy >= 0 && (ix as u32) < buf_w && (iy as u32) < buf_h {
+                    let idx = iy as usize * buf_w as usize + ix as usize;
+                    let v = if anti_alias {
+                        cov
+                    } else if cov > 0.5 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    coverage_buf[idx] = coverage_buf[idx].max(v);
+                    if bold && ix + 1 < buf_w as i32 {
+                        coverage_buf[idx + 1] = coverage_buf[idx + 1].max(v);
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw decorations per line
+    for (line_idx, &line_w) in line_widths.iter().enumerate() {
+        if line_w < 0.1 {
+            continue;
+        }
+        let y_off = line_idx as f32 * line_height;
+        let thickness = (font_size * 0.06).max(1.0);
+
+        if underline {
+            let line_y = origin_y + y_off + ascent + font_size * 0.1;
+            draw_decoration_line(
+                coverage_buf,
+                buf_w,
+                buf_h,
+                x0,
+                y0,
+                origin_x,
+                line_y,
+                line_w,
+                thickness,
+                alignment,
+            );
+        }
+
+        if strikethrough {
+            let line_y = origin_y + y_off + ascent * 0.6;
+            draw_decoration_line(
+                coverage_buf,
+                buf_w,
+                buf_h,
+                x0,
+                y0,
+                origin_x,
+                line_y,
+                line_w,
+                thickness,
+                alignment,
+            );
+        }
+    }
+
+    // Convert coverage to RGBA
+    let mut buf = vec![0u8; buf_w as usize * buf_h as usize * 4];
+    for (i, &cov) in coverage_buf.iter().enumerate().take(needed) {
+        if cov > 0.001 {
+            let idx = i * 4;
+            let a = (color[3] as f32 * cov).round().min(255.0) as u8;
+            buf[idx] = color[0];
+            buf[idx + 1] = color[1];
+            buf[idx + 2] = color[2];
+            buf[idx + 3] = a;
+        }
+    }
+
+    RasterizedText {
+        buf,
+        buf_w,
+        buf_h,
+        off_x: x0,
+        off_y: y0,
+        line_advances,
+        line_height,
+    }
+}
+
+fn draw_decoration_line(
+    coverage: &mut [f32],
+    buf_w: u32,
+    buf_h: u32,
+    x0: i32,
+    y0: i32,
+    origin_x: f32,
+    line_y: f32,
+    total_width: f32,
+    thickness: f32,
+    alignment: TextAlignment,
+) {
+    let line_start_x = origin_x
+        + match alignment {
+            TextAlignment::Left => 0.0,
+            TextAlignment::Center => -total_width * 0.5,
+            TextAlignment::Right => -total_width,
+        };
+
+    let half_t = thickness * 0.5;
+    let ly0 = ((line_y - half_t).floor() as i32 - y0).max(0);
+    let ly1 = ((line_y + half_t).ceil() as i32 - y0).min(buf_h as i32);
+    let lx0 = ((line_start_x).floor() as i32 - x0).max(0);
+    let lx1 = ((line_start_x + total_width).ceil() as i32 - x0).min(buf_w as i32);
+
+    for ly in ly0..ly1 {
+        for lx in lx0..lx1 {
+            let idx = ly as usize * buf_w as usize + lx as usize;
+            if idx < coverage.len() {
+                coverage[idx] = 1.0;
+            }
+        }
+    }
+}
+
+/// Enumerate system font families (family names only, no weight variants).
+/// Returns a sorted, deduplicated list of font family names.
+/// This is fast — just queries family names without loading any font data.
+/// On web there is no system font enumeration API available to wasm; only
+/// the fonts bundled with the app, plus any user-uploaded or Google Fonts
+/// the user has added this session, are offered.
+#[cfg(target_arch = "wasm32")]
+pub fn enumerate_system_fonts() -> Vec<String> {
+    let mut fonts = vec![
+        "DM Sans".to_string(),
+        "Noto Sans".to_string(),
+        "JetBrains Mono".to_string(),
+    ];
+    fonts.extend(custom_fonts::names());
+    fonts
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn enumerate_system_fonts() -> Vec<String> {
+    match font_kit::source::SystemSource::new().all_families() {
+        Ok(mut families) => {
+            families.sort();
+            families.dedup();
+            families
+        }
+        Err(_) => {
+            #[cfg(target_os = "linux")]
+            {
+                vec![
+                    "Liberation Sans".to_string(),
+                    "DejaVu Sans".to_string(),
+                    "Liberation Mono".to_string(),
+                ]
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                vec![
+                    "Arial".to_string(),
+                    "Times New Roman".to_string(),
+                    "Courier New".to_string(),
+                ]
+            }
+        }
+    }
+}
+
+/// Enumerate available weight variants for a specific font family.
+/// Returns list of (display_name, weight_value) pairs, e.g. [("Regular", 400), ("Light", 300), ("Bold", 700)].
+/// On web, the bundled fonts only ship a single Regular weight.
+#[cfg(target_arch = "wasm32")]
+pub fn enumerate_font_weights(_family: &str) -> Vec<(String, u16)> {
+    vec![("Regular".to_string(), 400)]
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn enumerate_font_weights(family: &str) -> Vec<(String, u16)> {
+    use font_kit::source::SystemSource;
+
+    let source = SystemSource::new();
+    let family_handle = match source.select_family_by_name(family) {
+        Ok(h) => h,
+        Err(_) => return vec![("Regular".to_string(), 400)],
+    };
+
+    let fonts = family_handle.fonts();
+    if fonts.is_empty() {
+        return vec![("Regular".to_string(), 400)];
+    }
+
+    let mut weights: Vec<(String, u16)> = Vec::new();
+    let mut seen_weights = std::collections::HashSet::new();
+
+    for font_handle in fonts {
+        if let Ok(font) = font_handle.load() {
+            let props = font.properties();
+            let weight_val = props.weight.0 as u16;
+            let style = props.style;
+            let is_italic = style == font_kit::properties::Style::Italic
+                || style == font_kit::properties::Style::Oblique;
+
+            // Skip italic variants — they're handled by the italic toggle
+            if is_italic {
+                continue;
+            }
+
+            if seen_weights.contains(&weight_val) {
+                continue;
+            }
+            seen_weights.insert(weight_val);
+
+            let weight_name = match weight_val {
+                0..=149 => "Thin",
+                150..=249 => "ExtraLight",
+                250..=349 => "Light",
+                350..=449 => "Regular",
+                450..=549 => "Medium",
+                550..=649 => "SemiBold",
+                650..=749 => "Bold",
+                750..=849 => "ExtraBold",
+                _ => "Black",
+            };
+
+            weights.push((weight_name.to_string(), weight_val));
+        }
+    }
+
+    if weights.is_empty() {
+        weights.push(("Regular".to_string(), 400));
+    }
+
+    weights.sort_by_key(|w| w.1);
+    weights
+}
+
+/// Load a font by family name, weight, and style from the system.
+/// `weight` is a CSS-style weight value (100=Thin, 400=Regular, 700=Bold, etc.)
+/// Returns None if the font cannot be found.
+/// On web there is no system font store to query: this checks user-uploaded
+/// / Google Fonts first, then falls back to the same TTF bytes embedded for
+/// egui's own UI chrome (bootstrap.rs) re-parsed as an `ab_glyph::FontArc` for
+/// canvas rasterization. Weight/italic variants aren't available for any of
+/// these — every web font is a single Regular-weight file.
+#[cfg(target_arch = "wasm32")]
+pub fn load_system_font(family: &str, _weight: u16, _italic: bool) -> Option<FontArc> {
+    if let Some(f) = custom_fonts::get(family) {
+        return Some(f);
+    }
+    match family {
+        "DM Sans" => {
+            FontArc::try_from_slice(include_bytes!("../../assets/fonts/DMSans-Regular.ttf")).ok()
+        }
+        "Noto Sans" => {
+            FontArc::try_from_slice(include_bytes!("../../assets/fonts/NotoSans-Regular.ttf")).ok()
+        }
+        "JetBrains Mono" => FontArc::try_from_slice(include_bytes!(
+            "../../assets/fonts/JetBrainsMono-Regular.ttf"
+        ))
+        .ok(),
+        _ => None,
+    }
+}
+
+/// Custom fonts (web only) — user-uploaded font files and fetched Google
+/// Fonts, held in memory for the session. There's no OS font store to write
+/// them into, so they just live in a process-wide registry that
+/// `enumerate_system_fonts`/`load_system_font` also consult.
+#[cfg(target_arch = "wasm32")]
+pub mod custom_fonts {
+    use super::FontArc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CUSTOM_FONTS: Mutex<Vec<(String, FontArc)>> = Mutex::new(Vec::new());
+    static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+    /// Register (or replace) a custom font under `family`. Bumps the
+    /// generation counter so UI that caches the font list knows to refresh.
+    pub fn register(family: String, font: FontArc) {
+        let mut fonts = CUSTOM_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        fonts.retain(|(name, _)| name != &family);
+        fonts.push((family, font));
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Parse raw font file bytes (ttf/otf/woff) and register them under `family`.
+    pub fn register_from_bytes(family: String, bytes: Vec<u8>) -> Result<(), String> {
+        let font = FontArc::try_from_vec(bytes)
+            .map_err(|_| "Not a valid TTF/OTF font file".to_string())?;
+        register(family, font);
+        Ok(())
+    }
+
+    pub fn remove(family: &str) {
+        let mut fonts = CUSTOM_FONTS.lock().unwrap_or_else(|e| e.into_inner());
+        fonts.retain(|(name, _)| name != family);
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn names() -> Vec<String> {
+        CUSTOM_FONTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
+
+    pub fn get(family: &str) -> Option<FontArc> {
+        CUSTOM_FONTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|(n, _)| n == family)
+            .map(|(_, f)| f.clone())
+    }
+
+    /// Monotonically increasing counter bumped whenever the custom font list
+    /// changes, so polling code can cheaply detect "did anything change?"
+    /// without diffing the whole list every frame.
+    pub fn generation() -> u64 {
+        GENERATION.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn load_system_font(family: &str, weight: u16, italic: bool) -> Option<FontArc> {
+    use font_kit::family_name::FamilyName;
+    use font_kit::properties::{Properties, Style, Weight};
+    use font_kit::source::SystemSource;
+
+    let mut props = Properties::new();
+    props.weight = Weight(weight as f32);
+    if italic {
+        props.style = Style::Italic;
+    }
+
+    let source = SystemSource::new();
+    let handle = source
+        .select_best_match(&[FamilyName::Title(family.to_string())], &props)
+        .ok()?;
+
+    let font_data = handle.load().ok()?;
+    let font_data_copy = font_data.copy_font_data()?;
+    let bytes: Vec<u8> = (*font_data_copy).clone();
+    FontArc::try_from_vec(bytes).ok()
+}
