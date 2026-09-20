@@ -2,6 +2,11 @@ impl PaintFEApp {
     fn update_runtime_input(&mut self, ctx: &egui::Context) -> bool {
         let ui_blocks_canvas_input = self.ui_pointer_capture_active;
 
+        // A toolbar/CLI/layer-driven tool change may have happened after the
+        // previous frame's canvas input. Resolve the floating Move Pixels edit
+        // before the newly selected tool can process this frame.
+        self.commit_move_pixels_on_tool_change();
+
         // --- Drag-and-Drop: open dropped image files as new projects ---
         {
             let shortcut_paste_present = ctx.input(|i| {
@@ -1137,6 +1142,7 @@ impl PaintFEApp {
                 for (action, tool) in tool_actions {
                     if kb.is_pressed(ctx, *action) {
                         self.tools_panel.change_tool(*tool);
+                        self.commit_move_pixels_on_tool_change();
                         break;
                     }
                 }

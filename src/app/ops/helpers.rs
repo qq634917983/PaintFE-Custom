@@ -258,6 +258,22 @@ impl PaintFEApp {
         }
     }
 
+    /// Finish a Move Pixels edit before another tool starts handling input.
+    ///
+    /// Move Pixels reuses the paste overlay as a floating edit session. Leaving
+    /// that session alive after switching to a selection tool lets both the
+    /// overlay and the new selection react to the same canvas input. Treat a
+    /// tool switch as an implicit confirmation, matching the other preview
+    /// tools that auto-commit when the user moves on.
+    fn commit_move_pixels_on_tool_change(&mut self) {
+        if self.is_move_pixels_active
+            && self.paste_overlay.is_some()
+            && self.tools_panel.active_tool != crate::components::tools::Tool::MovePixels
+        {
+            self.commit_paste_overlay();
+        }
+    }
+
     /// Cancel the active paste overlay.
     /// If MovePixels is active, restore the pre-extraction snapshot without pushing history.
     fn cancel_paste_overlay(&mut self) {

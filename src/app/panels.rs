@@ -141,6 +141,11 @@ impl PaintFEApp {
             }
         });
 
+        // Tool buttons are rendered after canvas input. Commit a floating Move
+        // Pixels session immediately when a different button is chosen so the
+        // next frame cannot contain both an edit overlay and a fresh selection.
+        self.commit_move_pixels_on_tool_change();
+
         if let Some(inner_resp) = resp {
             let win_rect = inner_resp.response.rect;
             self.remember_ui_cursor_rect(win_rect);
