@@ -885,6 +885,17 @@ impl LayersPanel {
                             ContextAction::ImportFromFile => {
                                 self.pending_app_action = Some(LayerAppAction::ImportFromFile);
                             }
+                            ContextAction::ExportSelectedPng => {
+                                let mut selected: Vec<usize> =
+                                    if self.selected_layers.contains(&layer_idx) {
+                                        self.selected_layers.iter().copied().collect()
+                                    } else {
+                                        vec![layer_idx]
+                                    };
+                                selected.sort_unstable_by(|a, b| b.cmp(a));
+                                self.pending_app_action =
+                                    Some(LayerAppAction::ExportSelectedPng(selected));
+                            }
                             ContextAction::FlipHorizontal => {
                                 self.pending_app_action = Some(LayerAppAction::FlipHorizontal);
                             }
@@ -1593,7 +1604,9 @@ impl LayersPanel {
 
         // Row click handling (select layer) — only when not dragging
         if !is_any_dragging && row_response.clicked() && action.is_none() {
-            let additive = ui.input(|i| i.modifiers.shift);
+            let additive = ui.input(|i| {
+                i.modifiers.shift || i.modifiers.ctrl || i.modifiers.command
+            });
             action = Some(LayerAction::Select { additive });
         }
 
@@ -1855,6 +1868,17 @@ impl LayersPanel {
                 .clicked()
             {
                 context_action = Some(ContextAction::ImportFromFile);
+                ui.close();
+            }
+            if assets
+                .menu_item(
+                    ui,
+                    Icon::MenuFileSave,
+                    &t!("layer.export_selected_png"),
+                )
+                .clicked()
+            {
+                context_action = Some(ContextAction::ExportSelectedPng);
                 ui.close();
             }
             ui.separator();

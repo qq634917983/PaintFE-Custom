@@ -1,3 +1,22 @@
+fn sanitize_layer_export_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || matches!(character, '-' | '_' | ' ') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        "Layer".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 impl PaintFEApp {
     fn reset_ui_cursor_blocking_rects(&mut self) {
         self.ui_cursor_blocking_rects_next.clear();
@@ -307,6 +326,45 @@ impl PaintFEApp {
                             self.do_snapshot_op("Import Layer", |s| {
                                 crate::ops::adjustments::import_layer_from_image(s, &rgba, &name);
                             });
+                        }
+                    }
+                    crate::components::layers::LayerAppAction::ExportSelectedPng(indices) => {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if let Some(folder) = rfd::FileDialog::new().pick_folder()
+                            && let Some(project) = self.projects.get(self.active_project_index)
+                        {
+                            let total = indices.len();
+                            for (position, layer_idx) in indices.into_iter().enumerate() {
+                                let Some(layer) = project.canvas_state.layers.get(layer_idx) else {
+                                    continue;
+                                };
+                                let mut image = layer.to_masked_rgba_image();
+                                if layer.opacity < 1.0 {
+                                    for pixel in image.pixels_mut() {
+                                        pixel[3] =
+                                            (pixel[3] as f32 * layer.opacity.clamp(0.0, 1.0))
+                                                .round() as u8;
+                                    }
+                                }
+                                let safe_name = sanitize_layer_export_name(&layer.name);
+                                let file_name = if total > 1 {
+                                    format!("{:03}_{}.png", position + 1, safe_name)
+                                } else {
+                                    format!("{}.png", safe_name)
+                                };
+                                let path = folder.join(file_name);
+                                if let Err(error) =
+                                    image.save_with_format(&path, image::ImageFormat::Png)
+                                {
+                                    crate::logger::write(
+                                        "ERROR",
+                                        &format!(
+                                            "Export layer PNG failed: {} ({error})",
+                                            path.display()
+                                        ),
+                                    );
+                                }
+                            }
                         }
                     }
                     crate::components::layers::LayerAppAction::FlipHorizontal => {

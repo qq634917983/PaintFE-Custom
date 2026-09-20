@@ -280,6 +280,7 @@ layer.move_up=Move Up
 layer.move_down=Move Down
 layer.move_to_bottom=Move to Bottom
 layer.import_from_file=Import Layer from File...
+layer.export_selected_png=Export Selected Layers as PNG...
 layer.transform=Transform
 layer.transform.flip_horizontal=Flip Horizontal
 layer.transform.flip_vertical=Flip Vertical

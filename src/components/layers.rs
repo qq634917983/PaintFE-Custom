@@ -95,6 +95,7 @@ struct DragState {
 #[derive(Debug, Clone)]
 pub enum LayerAppAction {
     ImportFromFile,
+    ExportSelectedPng(Vec<usize>),
     FlipHorizontal,
     FlipVertical,
     RotateScale,
@@ -173,6 +174,7 @@ enum ContextAction {
     MoveToBottom,
     Rename,
     ImportFromFile,
+    ExportSelectedPng,
     FlipHorizontal,
     FlipVertical,
     RotateScale,

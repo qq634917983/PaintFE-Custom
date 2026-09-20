@@ -279,6 +279,7 @@ layer.move_up=上移一层
 layer.move_down=下移一层
 layer.move_to_bottom=置底图层
 layer.import_from_file=从文件导入图层...
+layer.export_selected_png=将所选图层导出为 PNG...
 layer.transform=变换
 layer.transform.flip_horizontal=水平翻转
 layer.transform.flip_vertical=垂直翻转
