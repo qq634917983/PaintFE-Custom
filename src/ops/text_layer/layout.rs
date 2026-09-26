@@ -14,7 +14,7 @@ pub fn compute_block_layout(block: &TextBlock) -> BlockLayout {
     let mut lines: Vec<Vec<SegInfo>> = vec![Vec::new()];
 
     for (run_idx, run) in block.runs.iter().enumerate() {
-        let font = match load_font_for_style(&run.style) {
+        let font = match load_font_for_style(&run.style, &run.text) {
             Some(f) => f,
             None => {
                 // Can't load font — provide dummy metrics
@@ -132,7 +132,7 @@ pub fn compute_block_layout(block: &TextBlock) -> BlockLayout {
         // For single-run blocks, recompute height with word wrapping
         if block.runs.len() == 1 {
             let run = &block.runs[0];
-            if let Some(font) = load_font_for_style(&run.style) {
+            if let Some(font) = load_font_for_style(&run.style, &run.text) {
                 let wrapped_lines: Vec<String> = run
                     .text
                     .split('\n')
@@ -216,7 +216,7 @@ pub fn compute_glyph_bounds(block: &TextBlock) -> Vec<GlyphBounds> {
     let mut flat_offset = 0usize;
 
     for run in &block.runs {
-        let font = match load_font_for_style(&run.style) {
+        let font = match load_font_for_style(&run.style, &run.text) {
             Some(f) => f,
             None => continue,
         };
@@ -358,4 +358,3 @@ pub fn hit_test_blocks(data: &TextLayerData, x: f32, y: f32) -> Option<usize> {
     }
     None
 }
-

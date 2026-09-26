@@ -190,7 +190,7 @@ fn rasterize_block_multirun(
             DEFAULT.get_or_init(TextStyle::default)
         });
 
-        let font = match load_font_for_style(style) {
+        let font = match load_font_for_style(style, &all_text) {
             Some(f) => f,
             None => return,
         };
@@ -203,7 +203,7 @@ fn rasterize_block_multirun(
 
         let rasterized = text::rasterize_text(
             &font,
-            text::font_cache_key(&style.font_family, style.font_weight, style.italic),
+            text::font_cache_key_for_text(&style.font_family, style.font_weight, style.italic, &all_text),
             &all_text,
             style.font_size,
             alignment,
@@ -546,8 +546,10 @@ fn find_glyph_style(block: &TextBlock, glyph_index: usize) -> Option<(TextStyle,
                 continue;
             }
             if idx == glyph_index {
-                let font = load_font_for_style(&run.style)?;
-                return Some((run.style.clone(), font));
+                let font = load_font_for_style(&run.style, &run.text)?;
+                let mut style = run.style.clone();
+                style.font_family = text::font_family_for_text(&style.font_family, style.font_weight, style.italic, &run.text);
+                return Some((style, font));
             }
             idx += 1;
         }
@@ -667,7 +669,7 @@ fn rasterize_block_multirun_slow(
     let mut lines: Vec<Vec<RunSegment>> = vec![Vec::new()];
 
     for (run_idx, run) in block.runs.iter().enumerate() {
-        let font = match load_font_for_style(&run.style) {
+        let font = match load_font_for_style(&run.style, &run.text) {
             Some(f) => f,
             None => continue,
         };
@@ -691,10 +693,11 @@ fn rasterize_block_multirun_slow(
                     text: String::new(),
                     style: run.style.clone(),
                     font: font.clone(),
-                    font_cache_key: text::font_cache_key(
+                    font_cache_key: text::font_cache_key_for_text(
                         &run.style.font_family,
                         run.style.font_weight,
                         run.style.italic,
+                        &run.text,
                     ),
                     ascent: scaled.ascent(),
                     line_height: scaled.height(),
@@ -719,10 +722,11 @@ fn rasterize_block_multirun_slow(
                 text: part.to_string(),
                 style: run.style.clone(),
                 font: font.clone(),
-                font_cache_key: text::font_cache_key(
+                font_cache_key: text::font_cache_key_for_text(
                     &run.style.font_family,
                     run.style.font_weight,
                     run.style.italic,
+                    &run.text,
                 ),
                 ascent: scaled.ascent(),
                 line_height: scaled.height(),
@@ -811,4 +815,3 @@ fn rasterize_block_multirun_slow(
         y_pos += max_lh * block.paragraph.line_spacing;
     }
 }
-

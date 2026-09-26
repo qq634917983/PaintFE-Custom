@@ -10,13 +10,16 @@ impl ToolsPanel {
         } else {
             self.text_state.font_weight
         };
+        let render_family = crate::ops::text::font_family_for_text(
+            &self.text_state.font_family, effective_weight, self.text_state.italic, &self.text_state.text,
+        );
         let key = format!(
             "{}:{}:{}",
-            self.text_state.font_family, effective_weight, self.text_state.italic
+            render_family, effective_weight, self.text_state.italic
         );
         if self.text_state.loaded_font_key != key || self.text_state.loaded_font.is_none() {
             self.text_state.loaded_font = crate::ops::text::load_system_font(
-                &self.text_state.font_family,
+                &render_family,
                 effective_weight,
                 self.text_state.italic,
             );
@@ -1330,4 +1333,3 @@ impl ToolsPanel {
     }
 
 }
-

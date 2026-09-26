@@ -1,5 +1,5 @@
-fn load_font_for_style(style: &TextStyle) -> Option<FontArc> {
-    text::load_system_font(&style.font_family, style.font_weight, style.italic)
+fn load_font_for_style(style: &TextStyle, content: &str) -> Option<FontArc> {
+    text::load_font_for_text(&style.font_family, style.font_weight, style.italic, content)
 }
 
 /// Trim an RGBA buffer to the smallest rectangle containing non-transparent pixels.
@@ -759,4 +759,3 @@ fn extract_coverage_mask(rgba: &[u8], w: u32, h: u32) -> Vec<f32> {
         });
     mask
 }
-

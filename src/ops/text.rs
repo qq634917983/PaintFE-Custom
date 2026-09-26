@@ -18,6 +18,71 @@ pub fn font_cache_key(family: &str, weight: u16, italic: bool) -> u64 {
     hasher.finish()
 }
 
+/// Select one font for the entire run so layout, caret and rasterization agree.
+/// Keep the requested face whenever it covers the text; only missing glyphs
+/// trigger a CJK fallback. The stored font preference is not changed.
+pub fn font_family_for_text(family: &str, weight: u16, italic: bool, text: &str) -> String {
+    let supports = |font: &FontArc| {
+        text.chars()
+            .all(|ch| ch.is_control() || font.glyph_id(ch).0 != 0)
+    };
+    if let Some(font) = cached_text_font(family, weight, italic)
+        && supports(&font)
+    {
+        return family.to_owned();
+    }
+    for candidate in [
+        "PingFang SC",
+        "Microsoft YaHei",
+        "Noto Sans CJK SC",
+        "WenQuanYi Zen Hei",
+        "Arial Unicode MS",
+    ] {
+        if let Some(font) = cached_text_font(candidate, weight, italic)
+            && supports(&font)
+        {
+            return candidate.to_owned();
+        }
+    }
+    family.to_owned()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cached_text_font(family: &str, weight: u16, italic: bool) -> Option<FontArc> {
+    load_system_font(family, weight, italic)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cached_text_font(family: &str, weight: u16, italic: bool) -> Option<FontArc> {
+    type Cache = HashMap<(String, u16, bool), Option<FontArc>>;
+    static CACHE: OnceLock<std::sync::Mutex<Cache>> = OnceLock::new();
+    let key = (family.to_owned(), weight, italic);
+    let mut cache = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(key)
+        .or_insert_with(|| load_system_font(family, weight, italic))
+        .clone()
+}
+
+pub fn load_font_for_text(family: &str, weight: u16, italic: bool, text: &str) -> Option<FontArc> {
+    cached_text_font(
+        &font_family_for_text(family, weight, italic, text),
+        weight,
+        italic,
+    )
+}
+
+pub fn font_cache_key_for_text(family: &str, weight: u16, italic: bool, text: &str) -> u64 {
+    font_cache_key(
+        &font_family_for_text(family, weight, italic, text),
+        weight,
+        italic,
+    )
+}
+
 /// Text alignment options.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextAlignment {

@@ -9,6 +9,50 @@ mod common;
 
 #[cfg(target_os = "macos")]
 #[test]
+fn chinese_falls_back_without_changing_stored_text_or_font() {
+    use ab_glyph::Font;
+    use paintfe::ops::text;
+    let content = "123中文 输入测试";
+    let latin = text::load_system_font("Helvetica Neue", 400, false).unwrap();
+    assert_eq!(latin.glyph_id('中').0, 0, "test requires a Latin-only face");
+    let font = text::load_font_for_text("Helvetica Neue", 400, false, content).unwrap();
+    for ch in content.chars().filter(|ch| !ch.is_whitespace()) {
+        assert_ne!(font.glyph_id(ch).0, 0);
+        assert!(
+            font.outline_glyph(font.glyph_id(ch).with_scale(40.0))
+                .is_some()
+        );
+    }
+    assert_eq!(
+        text::font_family_for_text("Helvetica Neue", 400, false, "ABC"),
+        "Helvetica Neue"
+    );
+    assert_ne!(
+        text::font_cache_key_for_text("Helvetica Neue", 400, false, content),
+        text::font_cache_key("Helvetica Neue", 400, false)
+    );
+    let mut td = TextLayerData::default();
+    td.blocks[0].runs[0].style.font_family = "Helvetica Neue".into();
+    td.blocks[0].runs[0].text = content.into();
+    td.mark_dirty();
+    let rendered = rasterize(&mut td, 500, 150);
+    assert!(has_visible_pixels(&rendered, 500, 150));
+    assert_eq!(td.blocks[0].runs[0].text, content);
+    assert_eq!(td.blocks[0].runs[0].style.font_family, "Helvetica Neue");
+    let mut expected = TextLayerData::default();
+    expected.blocks[0].runs[0].text = content.into();
+    expected.blocks[0].runs[0].style.font_family = "PingFang SC".into();
+    expected.mark_dirty();
+    let expected_pixels = rasterize(&mut expected, 500, 150);
+    for y in 0..150 {
+        for x in 0..500 {
+            assert_eq!(rendered.get_pixel(x, y), expected_pixels.get_pixel(x, y));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn chinese_font_has_distinct_visible_glyphs() {
     use ab_glyph::Font;
     let font = paintfe::ops::text::load_system_font("PingFang SC", 400, false)
