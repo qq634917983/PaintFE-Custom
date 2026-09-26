@@ -42,6 +42,9 @@ impl ToolsPanel {
         escape_pressed_global: bool,
     ) {
         if self.active_tool == Tool::Text {
+            if !self.text_state.is_editing {
+                self.text_state.ime_composing = false;
+            }
             let escape_pressed = escape_pressed_global;
             let ctrl_enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
             // Handle-grab checks below use `canvas_pos_unclamped`, which maps
@@ -1624,6 +1627,16 @@ impl ToolsPanel {
                 let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
                 let shift_held = ui.input(|i| i.modifiers.shift);
                 let ctrl_held = ui.input(|i| i.modifiers.command);
+                let ime_commits_this_frame: Vec<&str> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        egui::Event::Ime(egui::ImeEvent::Commit(text)) if !text.is_empty() => {
+                            Some(text.as_str())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mut ime_composing = self.text_state.ime_composing;
 
                 // Ctrl+B / Ctrl+I / Ctrl+U formatting shortcuts (text layer only)
                 if self.text_state.editing_text_layer && ctrl_held {
@@ -1680,7 +1693,43 @@ impl ToolsPanel {
 
                 for event in &events {
                     match event {
+                        egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) => {
+                            ime_composing = !text.is_empty();
+                            continue;
+                        }
+                        egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                            ime_composing = false;
+                            if !text.is_empty() {
+                                if self.text_state.editing_text_layer {
+                                    self.text_layer_insert_text(canvas_state, text);
+                                } else {
+                                    self.text_state
+                                        .text
+                                        .insert_str(self.text_state.cursor_pos, text);
+                                    self.text_state.cursor_pos += text.len();
+                                    self.text_state.preview_dirty = true;
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // The IME owns keyboard input while composing. Some native
+                    // backends still emit the confirmation Space/Enter as a
+                    // normal key or text event in addition to Ime::Commit.
+                    if ime_composing && matches!(event, egui::Event::Key { .. }) {
+                        continue;
+                    }
+
+                    match event {
                         egui::Event::Text(t) => {
+                            if ime_composing
+                                || ime_commits_this_frame.iter().any(|commit| *commit == t)
+                                || (!ime_commits_this_frame.is_empty() && t.trim().is_empty())
+                            {
+                                continue;
+                            }
                             if self.text_state.editing_text_layer {
                                 self.text_layer_insert_text(canvas_state, t);
                             } else {
@@ -1841,6 +1890,7 @@ impl ToolsPanel {
                         _ => {}
                     }
                 }
+                self.text_state.ime_composing = ime_composing;
 
                 // Re-render preview if dirty
                 if self.text_state.preview_dirty {

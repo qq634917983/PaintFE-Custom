@@ -1449,6 +1449,10 @@ pub struct TextToolState {
     pub cursor_pos: usize,
     pub origin: Option<[f32; 2]>,
     pub is_editing: bool,
+    /// True while the platform input method has an active preedit composition.
+    /// Used to prevent IME-confirmation keys (notably Space) from leaking into
+    /// the document as ordinary text.
+    pub ime_composing: bool,
     pub font_family: String,
     pub font_size: f32,
     pub font_weight: u16,
@@ -1607,6 +1611,7 @@ impl Default for TextToolState {
             cursor_pos: 0,
             origin: None,
             is_editing: false,
+            ime_composing: false,
             font_family: crate::ops::text::preferred_default_font_family(),
             font_size: 23.0,
             font_weight: 400,
