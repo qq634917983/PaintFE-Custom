@@ -187,6 +187,10 @@ impl PaintFEApp {
         let mut show = self.window_visibility.layers;
         let mut close_clicked = false;
         self.is_pointer_over_layers_panel = false;
+        let active_layer_before = self
+            .active_project()
+            .map(|project| project.canvas_state.active_layer_index);
+        let move_pixels_was_active = self.is_move_pixels_active;
 
         let screen_rect = ctx.content_rect();
         let screen_w = screen_rect.max.x;
@@ -282,8 +286,10 @@ impl PaintFEApp {
 
                 // Auto-switch tool immediately when layer selection changes
                 // (same frame as click, no 1-frame delay).
-                self.tools_panel
-                    .auto_switch_tool_for_layer(&project.canvas_state);
+                if !move_pixels_was_active {
+                    self.tools_panel
+                        .auto_switch_tool_for_layer(&project.canvas_state);
+                }
             }
 
             // Cancel paste overlay if the layer it was on was deleted.
@@ -472,6 +478,16 @@ impl PaintFEApp {
                 }
             }
         });
+
+        let active_layer_after = self
+            .active_project()
+            .map(|project| project.canvas_state.active_layer_index);
+        if move_pixels_was_active
+            && active_layer_after != active_layer_before
+            && let Some(target_layer) = active_layer_after
+        {
+            self.restart_move_pixels_on_layer_change(target_layer);
+        }
 
         // Update the stored right-edge offset from the window's actual position
         // so that user drags are remembered and window resizes keep the offset.

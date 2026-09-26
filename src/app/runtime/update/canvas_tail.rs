@@ -33,6 +33,7 @@ impl PaintFEApp {
         let mut start_straighten = false;
         let mut commit_straighten = false;
         let mut cancel_straighten = false;
+        let mut paste_button_transform = None;
         #[allow(deprecated)]
         let shelf_resp = egui::Panel::top("tool_shelf_strip")
             .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(shelf_margin as i8)))
@@ -126,6 +127,16 @@ impl PaintFEApp {
                             ui.add_space(4.0);
 
                             // Quick actions
+                            if ui.button(t!("paste.flip_horizontal")).clicked() {
+                                let before = overlay.transform();
+                                overlay.toggle_flip_horizontal();
+                                paste_button_transform = Some((before, overlay.transform()));
+                            }
+                            if ui.button(t!("paste.flip_vertical")).clicked() {
+                                let before = overlay.transform();
+                                overlay.toggle_flip_vertical();
+                                paste_button_transform = Some((before, overlay.transform()));
+                            }
                             if ui
                                 .button(t!("common.reset"))
                                 .on_hover_text(t!("paste.reset_all_transforms"))
@@ -135,6 +146,8 @@ impl PaintFEApp {
                                 overlay.scale_x = 1.0;
                                 overlay.scale_y = 1.0;
                                 overlay.anchor_offset = egui::Vec2::ZERO;
+                                overlay.flip_horizontal = false;
+                                overlay.flip_vertical = false;
                             }
                         } else {
                             let ctx_primary = self.colors_panel.get_primary_color();
@@ -157,6 +170,12 @@ impl PaintFEApp {
                 });
             });
         self.remember_ui_cursor_rect(shelf_resp.response.rect);
+        if let Some((before, after)) = paste_button_transform
+            && before != after
+        {
+            self.paste_transform_undo.push(before);
+            self.paste_transform_redo.clear();
+        }
         if start_straighten { self.start_straighten(); }
         if commit_straighten { self.commit_straighten(); }
         if cancel_straighten { self.cancel_straighten(); }

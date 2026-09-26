@@ -825,6 +825,9 @@ pub struct PasteOverlay {
     /// Scale factor (1.0 = original size).
     pub scale_x: f32,
     pub scale_y: f32,
+    /// Mirror the source inside its transformed bounds.
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
     /// Anchor point offset from center (canvas coords, relative to source center).
     pub anchor_offset: Vec2,
     /// Interpolation filter to use when committing.
@@ -855,8 +858,8 @@ pub struct PasteOverlay {
     /// Cached pre-scaled source image.
     cached_scaled: Option<(RgbaImage, u32, u32)>, // (img, scaled_w, scaled_h)
     /// Cached preview TiledImage + the transform state used to produce it.
-    cached_preview: Option<(TiledImage, Pos2, f32, f32, f32, Vec2, u32, u32)>,
-    // (tiled, center, scale_x, scale_y, rotation, anchor_offset, cw, ch)
+    cached_preview: Option<(TiledImage, Pos2, f32, f32, f32, Vec2, bool, bool, u32, u32)>,
+    // (tiled, center, scale_x, scale_y, rotation, anchor_offset, flips, cw, ch)
 
     // --- GPU texture cache ---
     /// Cached GPU texture of the source image for GPU-accelerated rendering.
@@ -886,6 +889,8 @@ pub struct PasteOverlayTransform {
     pub scale_x: f32,
     pub scale_y: f32,
     pub anchor_offset: Vec2,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
 }
 
 impl PasteOverlay {
@@ -895,6 +900,8 @@ impl PasteOverlay {
             center: Pos2::new(canvas_w as f32 / 2.0, canvas_h as f32 / 2.0),
             scale_x: 1.0,
             scale_y: 1.0,
+            flip_horizontal: false,
+            flip_vertical: false,
             rotation: 0.0,
             anchor_offset: Vec2::ZERO,
             interpolation: Interpolation::Bilinear,
@@ -924,6 +931,8 @@ impl PasteOverlay {
             scale_x: self.scale_x,
             scale_y: self.scale_y,
             anchor_offset: self.anchor_offset,
+            flip_horizontal: self.flip_horizontal,
+            flip_vertical: self.flip_vertical,
         }
     }
 
@@ -933,7 +942,34 @@ impl PasteOverlay {
         self.scale_x = t.scale_x;
         self.scale_y = t.scale_y;
         self.anchor_offset = t.anchor_offset;
+        self.flip_horizontal = t.flip_horizontal;
+        self.flip_vertical = t.flip_vertical;
         self.invalidate_cache();
+    }
+
+    pub fn toggle_flip_horizontal(&mut self) {
+        self.flip_horizontal = !self.flip_horizontal;
+        self.invalidate_cache();
+    }
+
+    pub fn toggle_flip_vertical(&mut self) {
+        self.flip_vertical = !self.flip_vertical;
+        self.invalidate_cache();
+    }
+
+    #[inline]
+    fn source_local(&self, x: f32, y: f32, width: u32, height: u32) -> (f32, f32) {
+        let source_x = if self.flip_horizontal {
+            width as f32 - x
+        } else {
+            x
+        };
+        let source_y = if self.flip_vertical {
+            height as f32 - y
+        } else {
+            y
+        };
+        (source_x, source_y)
     }
 
     pub fn transformed_bounds(&self, cw: u32, ch: u32) -> Option<(u32, u32, u32, u32)> {
@@ -1116,11 +1152,12 @@ impl PasteOverlay {
                     continue;
                 }
 
+                let (source_x, source_y) = self.source_local(local_x, local_y, scaled_w, scaled_h);
                 let src_px = if use_aa {
-                    sample_bilinear(&scaled, local_x - 0.5, local_y - 0.5, scaled_w, scaled_h)
+                    sample_bilinear(&scaled, source_x - 0.5, source_y - 0.5, scaled_w, scaled_h)
                 } else {
-                    let ix = (local_x as u32).min(scaled_w - 1);
-                    let iy = (local_y as u32).min(scaled_h - 1);
+                    let ix = (source_x as u32).min(scaled_w - 1);
+                    let iy = (source_y as u32).min(scaled_h - 1);
                     *scaled.get_pixel(ix, iy)
                 };
                 if src_px[3] > 0 {
@@ -1238,16 +1275,17 @@ impl PasteOverlay {
                     continue;
                 }
 
+                let (source_x, source_y) = self.source_local(local_x, local_y, scaled_w, scaled_h);
                 let src_px = if use_aa {
-                    sample_bilinear(&scaled, local_x - 0.5, local_y - 0.5, scaled_w, scaled_h)
+                    sample_bilinear(&scaled, source_x - 0.5, source_y - 0.5, scaled_w, scaled_h)
                 } else {
-                    let ix = (local_x as u32).min(scaled_w - 1);
-                    let iy = (local_y as u32).min(scaled_h - 1);
+                    let ix = (source_x as u32).min(scaled_w - 1);
+                    let iy = (source_y as u32).min(scaled_h - 1);
                     *scaled.get_pixel(ix, iy)
                 };
 
                 if overwrite_transparent
-                    && self.overwrite_mask_allows(local_x, local_y, scaled_mask.as_ref())
+                    && self.overwrite_mask_allows(source_x, source_y, scaled_mask.as_ref())
                 {
                     out.put_pixel(dx, dy, src_px);
                 } else if src_px[3] > 0 {
@@ -1424,25 +1462,30 @@ impl PasteOverlay {
         let white = Color32::WHITE;
         let mut mesh = egui::Mesh::with_texture(tex.id());
 
-        // Vertices: TL, TR, BL, BR  with UV corners
+        let u_left = if self.flip_horizontal { 1.0 } else { 0.0 };
+        let u_right = if self.flip_horizontal { 0.0 } else { 1.0 };
+        let v_top = if self.flip_vertical { 1.0 } else { 0.0 };
+        let v_bottom = if self.flip_vertical { 0.0 } else { 1.0 };
+
+        // Vertices: TL, TR, BL, BR with mirrored UVs when requested.
         mesh.vertices.push(egui::epaint::Vertex {
             pos: s_tl,
-            uv: Pos2::new(0.0, 0.0),
+            uv: Pos2::new(u_left, v_top),
             color: white,
         });
         mesh.vertices.push(egui::epaint::Vertex {
             pos: s_tr,
-            uv: Pos2::new(1.0, 0.0),
+            uv: Pos2::new(u_right, v_top),
             color: white,
         });
         mesh.vertices.push(egui::epaint::Vertex {
             pos: s_bl,
-            uv: Pos2::new(0.0, 1.0),
+            uv: Pos2::new(u_left, v_bottom),
             color: white,
         });
         mesh.vertices.push(egui::epaint::Vertex {
             pos: s_br,
-            uv: Pos2::new(1.0, 1.0),
+            uv: Pos2::new(u_right, v_bottom),
             color: white,
         });
 
@@ -1850,6 +1893,8 @@ impl PasteOverlay {
                 scale_x: self.drag_start_scale_x,
                 scale_y: self.drag_start_scale_y,
                 anchor_offset: self.drag_start_anchor,
+                flip_horizontal: self.flip_horizontal,
+                flip_vertical: self.flip_vertical,
             };
             let after = self.transform();
             if before != after {
@@ -2116,15 +2161,17 @@ impl PasteOverlay {
                         continue;
                     }
 
+                    let (source_x, source_y) =
+                        self.source_local(local_x, local_y, scaled_w, scaled_h);
                     let src_px = if use_aa {
-                        sample_bilinear(&scaled, local_x - 0.5, local_y - 0.5, scaled_w, scaled_h)
+                        sample_bilinear(&scaled, source_x - 0.5, source_y - 0.5, scaled_w, scaled_h)
                     } else {
-                        let ix = (local_x as u32).min(scaled_w - 1);
-                        let iy = (local_y as u32).min(scaled_h - 1);
+                        let ix = (source_x as u32).min(scaled_w - 1);
+                        let iy = (source_y as u32).min(scaled_h - 1);
                         *scaled.get_pixel(ix, iy)
                     };
                     if overwrite_transparent
-                        && self.overwrite_mask_allows(local_x, local_y, scaled_mask.as_ref())
+                        && self.overwrite_mask_allows(source_x, source_y, scaled_mask.as_ref())
                     {
                         row_patches.push((dx, dy, src_px));
                     } else if src_px[3] > 0 {
@@ -2147,7 +2194,7 @@ impl PasteOverlay {
     /// Check whether the cached preview is still valid for the current transform.
     pub fn preview_cache_valid(&self, canvas_w: u32, canvas_h: u32) -> bool {
         match &self.cached_preview {
-            Some((_, c, sx, sy, rot, ao, cw, ch)) => {
+            Some((_, c, sx, sy, rot, ao, flip_h, flip_v, cw, ch)) => {
                 *cw == canvas_w
                     && *ch == canvas_h
                     && (c.x - self.center.x).abs() < 0.001
@@ -2157,6 +2204,8 @@ impl PasteOverlay {
                     && (*rot - self.rotation).abs() < 0.0001
                     && (ao.x - self.anchor_offset.x).abs() < 0.001
                     && (ao.y - self.anchor_offset.y).abs() < 0.001
+                    && *flip_h == self.flip_horizontal
+                    && *flip_v == self.flip_vertical
             }
             None => false,
         }
@@ -2312,6 +2361,8 @@ impl PasteOverlay {
             self.scale_y,
             self.rotation,
             self.anchor_offset,
+            self.flip_horizontal,
+            self.flip_vertical,
             canvas_w,
             canvas_h,
         ));

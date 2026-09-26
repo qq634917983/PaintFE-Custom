@@ -274,6 +274,42 @@ impl PaintFEApp {
         }
     }
 
+    /// Move Pixels always follows the active layer. Switching layers cancels
+    /// the old floating extraction (restoring its pixels and selection), then
+    /// starts a fresh extraction from the same selected area on the new layer.
+    fn restart_move_pixels_on_layer_change(&mut self, target_layer: usize) {
+        if !self.is_move_pixels_active || self.paste_overlay.is_none() {
+            return;
+        }
+
+        self.cancel_paste_overlay();
+
+        let interpolation = self.tools_panel.move_interpolation;
+        let anti_aliasing = self.tools_panel.move_anti_aliasing;
+        let mut next_overlay = None;
+        let mut before = None;
+        if let Some(project) = self.active_project_mut()
+            && target_layer < project.canvas_state.layers.len()
+        {
+            project.canvas_state.active_layer_index = target_layer;
+            before = Some(crate::components::history::CanvasSnapshot::capture(
+                &project.canvas_state,
+            ));
+            next_overlay = crate::ops::clipboard::extract_to_overlay(&mut project.canvas_state);
+            if next_overlay.is_some() {
+                project.mark_dirty();
+            }
+        }
+
+        if let Some(mut overlay) = next_overlay {
+            overlay.interpolation = interpolation;
+            overlay.anti_aliasing = anti_aliasing;
+            self.paste_overlay = Some(overlay);
+            self.move_pixels_before = before;
+            self.is_move_pixels_active = true;
+        }
+    }
+
     /// Cancel the active paste overlay.
     /// If MovePixels is active, restore the pre-extraction snapshot without pushing history.
     fn cancel_paste_overlay(&mut self) {
