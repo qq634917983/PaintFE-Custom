@@ -690,7 +690,12 @@ impl PaintFEApp {
             && !self.tools_panel.text_state.font_popup_open
             && let Some(canvas_id) = self.canvas.canvas_widget_id
         {
-            ctx.memory_mut(|m| m.request_focus(canvas_id));
+            ctx.memory_mut(|m| {
+                // request_focus interrupts IME even when the ID is unchanged.
+                if !m.has_focus(canvas_id) {
+                    m.request_focus(canvas_id);
+                }
+            });
         }
 
         // Handle scroll wheel zoom — only when mouse is over the canvas and NOT over a widget

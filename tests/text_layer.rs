@@ -7,6 +7,23 @@
 
 mod common;
 
+#[cfg(target_os = "macos")]
+#[test]
+fn chinese_font_has_distinct_visible_glyphs() {
+    use ab_glyph::Font;
+    let font = paintfe::ops::text::load_system_font("PingFang SC", 400, false)
+        .expect("macOS Chinese system font must load");
+    for ch in "中文输入测试".chars() {
+        let id = font.glyph_id(ch);
+        assert_ne!(id.0, 0, "missing glyph for {ch}");
+        assert!(
+            font.outline_glyph(id.with_scale(40.0)).is_some(),
+            "blank glyph for {ch}"
+        );
+    }
+    assert_ne!(font.glyph_id('中'), font.glyph_id('文'));
+}
+
 use paintfe::canvas::{CanvasState, Layer, LayerContent};
 use paintfe::ops::text_layer::{
     ParagraphStyle, TextBlock, TextLayerData, TextRun, TextStyle, TextWarp,

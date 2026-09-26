@@ -292,7 +292,9 @@ impl Canvas {
             || response.clicked()
             || force_canvas_focus_for_text
         {
-            response.request_focus();
+            if !response.has_focus() {
+                response.request_focus();
+            }
         }
         let canvas_rect = response.rect;
         self.last_canvas_rect = Some(canvas_rect);

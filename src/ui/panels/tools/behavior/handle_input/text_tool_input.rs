@@ -1,3 +1,121 @@
+#[cfg(test)]
+mod ime_regression_tests {
+    use super::*;
+
+    fn frame(
+        panel: &mut ToolsPanel,
+        canvas: &mut CanvasState,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) {
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                let rect = ui.max_rect();
+                panel.handle_text_tool_input(
+                    ui,
+                    canvas,
+                    None,
+                    None,
+                    None,
+                    None,
+                    &[],
+                    ui.painter(),
+                    rect,
+                    rect,
+                    1.0,
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0; 4],
+                    &mut None,
+                    &mut None,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                    false,
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn keeping_canvas_focus_does_not_interrupt_composition() {
+        let ctx = egui::Context::default();
+        for frame in 0..3 {
+            let output = ctx.run_ui(Default::default(), |ui| {
+                let id = egui::Id::new("ime-canvas-test");
+                let rect = ui.max_rect();
+                let response = ui.interact(rect, id, egui::Sense::click());
+                if !response.has_focus() {
+                    response.request_focus();
+                }
+                ui.ctx().output_mut(|o| {
+                    o.ime = Some(egui::output::IMEOutput {
+                        rect,
+                        cursor_rect: rect,
+                        should_interrupt_composition: false,
+                    })
+                });
+            });
+            if frame > 0 {
+                assert!(
+                    !output
+                        .platform_output
+                        .ime
+                        .unwrap()
+                        .should_interrupt_composition
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn chinese_composition_and_fast_repeated_commits_preserve_spaces() {
+        let ctx = egui::Context::default();
+        let mut panel = ToolsPanel::default();
+        panel.active_tool = Tool::Text;
+        panel.text_state.is_editing = true;
+        let mut canvas = CanvasState::new(200, 100);
+        frame(
+            &mut panel,
+            &mut canvas,
+            &ctx,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Preedit {
+                    text: "zhongwen".into(),
+                    active_range_chars: None,
+                }),
+                egui::Event::Text(" ".into()),
+            ],
+        );
+        assert!(panel.text_state.text.is_empty());
+        assert!(panel.text_state.ime_composing);
+        frame(
+            &mut panel,
+            &mut canvas,
+            &ctx,
+            vec![
+                egui::Event::Ime(egui::ImeEvent::Commit("中文".into())),
+                egui::Event::Text(" ".into()),
+                egui::Event::Ime(egui::ImeEvent::Commit("中文".into())),
+                egui::Event::Text("中文".into()),
+            ],
+        );
+        assert_eq!(panel.text_state.text, "中文 中文中文");
+        assert_eq!(panel.text_state.cursor_pos, panel.text_state.text.len());
+        assert!(!panel.text_state.ime_composing);
+    }
+}
+
 impl ToolsPanel {
     fn clear_text_preview_cache(&mut self, canvas_state: &mut CanvasState) {
         self.text_state.cached_raster_buf.clear();
@@ -45,8 +163,22 @@ impl ToolsPanel {
             if !self.text_state.is_editing {
                 self.text_state.ime_composing = false;
             }
-            let escape_pressed = escape_pressed_global;
-            let ctrl_enter = ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+            // Candidate confirmation/cancellation belongs to the IME, including
+            // the frame that clears preedit and commits the candidate.
+            let ime_owns_keys = self.text_state.ime_composing
+                || ui.input(|i| {
+                    i.events.iter().any(|e| {
+                        matches!(
+                            e,
+                            egui::Event::Ime(
+                                egui::ImeEvent::Preedit { .. } | egui::ImeEvent::Commit(_)
+                            )
+                        )
+                    })
+                });
+            let escape_pressed = escape_pressed_global && !ime_owns_keys;
+            let ctrl_enter = !ime_owns_keys
+                && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
             // Handle-grab checks below use `canvas_pos_unclamped`, which maps
             // the pointer to canvas space unconditionally (so handles remain
             // grabbable when dragged off-canvas) — but that means a press on
@@ -142,7 +274,7 @@ impl ToolsPanel {
             }
 
             // Enter (without Ctrl): insert newline
-            if enter_pressed && !ctrl_enter && self.text_state.is_editing {
+            if enter_pressed && !ctrl_enter && !ime_owns_keys && self.text_state.is_editing {
                 if self.text_state.editing_text_layer {
                     // Text layer mode: insert into the active block's runs
                     self.text_layer_insert_text(canvas_state, "\n");
@@ -1627,19 +1759,10 @@ impl ToolsPanel {
                 let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
                 let shift_held = ui.input(|i| i.modifiers.shift);
                 let ctrl_held = ui.input(|i| i.modifiers.command);
-                let ime_commits_this_frame: Vec<&str> = events
-                    .iter()
-                    .filter_map(|event| match event {
-                        egui::Event::Ime(egui::ImeEvent::Commit(text)) if !text.is_empty() => {
-                            Some(text.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect();
                 let mut ime_composing = self.text_state.ime_composing;
 
                 // Ctrl+B / Ctrl+I / Ctrl+U formatting shortcuts (text layer only)
-                if self.text_state.editing_text_layer && ctrl_held {
+                if self.text_state.editing_text_layer && ctrl_held && !ime_owns_keys {
                     let b_pressed = ui.input(|i| i.key_pressed(egui::Key::B));
                     let i_pressed = ui.input(|i| i.key_pressed(egui::Key::I));
                     let u_pressed = ui.input(|i| i.key_pressed(egui::Key::U));
@@ -1684,7 +1807,7 @@ impl ToolsPanel {
                 }
 
                 // Tab: cycle between blocks (text layer only)
-                if self.text_state.editing_text_layer {
+                if self.text_state.editing_text_layer && !ime_owns_keys {
                     let tab_pressed = ui.input(|i| i.key_pressed(egui::Key::Tab));
                     if tab_pressed {
                         self.text_layer_cycle_block(canvas_state, shift_held);
@@ -1715,19 +1838,15 @@ impl ToolsPanel {
                         _ => {}
                     }
 
-                    // The IME owns keyboard input while composing. Some native
-                    // backends still emit the confirmation Space/Enter as a
-                    // normal key or text event in addition to Ime::Commit.
+                    // Composition keys belong to the IME. Preserve event order:
+                    // ordinary text after Commit is new input, not a duplicate.
                     if ime_composing && matches!(event, egui::Event::Key { .. }) {
                         continue;
                     }
 
                     match event {
                         egui::Event::Text(t) => {
-                            if ime_composing
-                                || ime_commits_this_frame.iter().any(|commit| *commit == t)
-                                || (!ime_commits_this_frame.is_empty() && t.trim().is_empty())
-                            {
+                            if ime_composing {
                                 continue;
                             }
                             if self.text_state.editing_text_layer {
