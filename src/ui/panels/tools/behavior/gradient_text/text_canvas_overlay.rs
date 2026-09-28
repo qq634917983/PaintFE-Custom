@@ -23,9 +23,14 @@ impl ToolsPanel {
         let block = td.blocks.iter().find(|block| block.id == id)?;
         let layout = crate::ops::text_layer::compute_block_layout(block);
         let bottom = block.position[1] + block.max_height.unwrap_or(layout.total_height).max(layout.total_height);
-        let x = canvas_rect.min.x + block.position[0] * zoom;
+        let content_width = block.max_width.unwrap_or(layout.total_width)
+            .max(block.runs.first().map_or(24.0, |run| run.style.font_size * 1.8));
+        let box_left = canvas_rect.min.x + (block.position[0] - 4.0) * zoom;
+        let box_width = (content_width + 8.0) * zoom;
+        let button_width = 52.0_f32.min(box_width.max(1.0));
+        let x = box_left + (box_width - button_width) * 0.5;
         let y = canvas_rect.min.y + bottom * zoom + 10.0;
-        Some(Rect::from_min_size(egui::pos2(x, y), egui::vec2(68.0, 25.0)))
+        Some(Rect::from_min_size(egui::pos2(x, y), egui::vec2(button_width, 22.0)))
     }
 
     pub fn update_gradient_if_dirty(
@@ -451,12 +456,12 @@ impl ToolsPanel {
         if let Some((index, id)) = self.text_state.selected_text_box
             && let Some(controls) = self.selected_text_controls_rect(canvas_state, canvas_rect, zoom)
         {
-            let button = egui::Rect::from_min_size(controls.min, egui::vec2(68.0, 25.0));
+            let button = controls;
             let label = if self.text_state.is_editing { "确定" } else { "编辑" };
             let hovered = button.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or_default()));
             painter.rect_filled(button, 4.0, if hovered { Color32::from_rgb(65, 92, 120) } else { Color32::from_rgb(44, 53, 64) });
             painter.rect_stroke(button, 4.0, egui::Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Inside);
-            painter.text(button.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(13.0), Color32::WHITE);
+            painter.text(button.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(12.0), Color32::WHITE);
             if ui.interact(button, egui::Id::new(("text-box-toggle", index, id)), egui::Sense::click()).clicked() {
                 self.text_state.toggle_selected_text_box_editing = true;
             }
