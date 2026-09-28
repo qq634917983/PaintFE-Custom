@@ -1536,8 +1536,7 @@ pub struct TextToolState {
     pub active_block_id: Option<u64>,
     /// Last selected text box, retained after editing is confirmed.
     pub selected_text_box: Option<(usize, u64)>,
-    pub reopen_selected_text_box: bool,
-    pub confirm_selected_text_box: bool,
+    pub toggle_selected_text_box_editing: bool,
     /// Set by context bar when style properties change; consumed by handle_input
     /// to apply to selection in text layer mode.
     pub ctx_bar_style_dirty: bool,
@@ -1666,8 +1665,7 @@ impl Default for TextToolState {
             selection: crate::ops::text_layer::TextSelection::default(),
             active_block_id: None,
             selected_text_box: None,
-            reopen_selected_text_box: false,
-            confirm_selected_text_box: false,
+            toggle_selected_text_box_editing: false,
             ctx_bar_style_dirty: false,
             pending_ctx_style_update: None,
             text_effects: crate::ops::text_layer::TextEffects::default(),
