@@ -1,4 +1,50 @@
 impl ToolsPanel {
+    /// A new text box always owns editable text data on a dedicated layer.
+    fn create_editable_text_box(&mut self, canvas_state: &mut CanvasState, position: [f32; 2]) {
+        use crate::components::history::SnapshotCommand;
+        let mut history = SnapshotCommand::new("Add Text Box".to_owned(), canvas_state);
+        let mut layer = crate::canvas::Layer::new_text(
+            format!("Text {}", canvas_state.layers.len() + 1),
+            canvas_state.width,
+            canvas_state.height,
+        );
+        layer.folder_id = canvas_state
+            .layers
+            .get(canvas_state.active_layer_index)
+            .and_then(|layer| layer.folder_id);
+        if let crate::canvas::LayerContent::Text(ref mut td) = layer.content {
+            let block = &mut td.blocks[0];
+            block.position = position;
+            block.runs[0].style.font_family = self.text_state.font_family.clone();
+            block.runs[0].style.font_size = self.text_state.font_size;
+            block.runs[0].style.font_weight = self.text_state.font_weight;
+            block.runs[0].style.italic = self.text_state.italic;
+            block.runs[0].style.underline = self.text_state.underline;
+            block.runs[0].style.strikethrough = self.text_state.strikethrough;
+            block.runs[0].style.color = self.text_state.last_color;
+            block.runs[0].style.letter_spacing = self.text_state.letter_spacing;
+            block.runs[0].style.width_scale = self.text_state.width_scale;
+            block.runs[0].style.height_scale = self.text_state.height_scale;
+            block.paragraph.line_spacing = self.text_state.line_spacing;
+            block.paragraph.alignment = match self.text_state.alignment {
+                crate::ops::text::TextAlignment::Left => crate::ops::text_layer::TextAlignment::Left,
+                crate::ops::text::TextAlignment::Center => crate::ops::text_layer::TextAlignment::Center,
+                crate::ops::text::TextAlignment::Right => crate::ops::text_layer::TextAlignment::Right,
+            };
+        }
+        let index = (canvas_state.active_layer_index + 1).min(canvas_state.layers.len());
+        canvas_state.layers.insert(index, layer);
+        canvas_state.active_layer_index = index;
+        // This layer change originated inside the text tool; it must not be
+        // treated as an external layer switch on the next input frame.
+        self.last_tracked_layer_index = index;
+        self.last_tracked_layer_count = canvas_state.layers.len();
+        history.set_after(canvas_state);
+        self.pending_history_commands.push(Box::new(history));
+        self.load_text_layer_block(canvas_state, Some(1), None);
+        canvas_state.mark_dirty(None);
+    }
+
     fn ensure_text_font_loaded(&mut self) {
         // Compute effective weight: if bold toggled and weight is normal, use Bold weight
         let effective_weight = if self.text_state.bold {
@@ -446,6 +492,7 @@ impl ToolsPanel {
         self.text_state.editing_text_layer = true;
         self.text_state.editing_layer_index = Some(canvas_state.active_layer_index);
         self.text_state.active_block_id = Some(bid);
+        self.text_state.selected_text_box = Some((layer_idx, bid));
         self.text_state.selection = crate::ops::text_layer::TextSelection::default();
         self.text_state.font_family = style.font_family.clone();
         self.text_state.font_size = style.font_size;
@@ -1301,6 +1348,8 @@ impl ToolsPanel {
             }
         }
 
+        // Keep the box selected after confirming, so it can be reopened.
+        self.text_state.selected_text_box = self.text_state.active_block_id.map(|id| (canvas_state.active_layer_index, id));
         // Clean up editing state
         self.text_state.text.clear();
         self.text_state.cursor_pos = 0;

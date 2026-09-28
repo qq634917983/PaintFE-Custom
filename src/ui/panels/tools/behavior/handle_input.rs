@@ -472,6 +472,33 @@ impl ToolsPanel {
             self.tool_state.current_pressure = 1.0;
         }
 
+        // Photoshop-style reopening works from other tools as well as Text.
+        if self.active_tool != Tool::Text
+            && is_primary_clicked
+            && ui.input(|input| input.pointer.button_double_clicked(egui::PointerButton::Primary))
+            && !self.has_active_tool_preview()
+            && let Some((x, y)) = canvas_pos_f32
+        {
+            let target = canvas_state.layers.iter().enumerate().rev().find_map(|(index, layer)| {
+                if !layer.visible { return None; }
+                let crate::canvas::LayerContent::Text(ref data) = layer.content else { return None; };
+                crate::ops::text_layer::hit_test_blocks(data, x, y)
+                    .and_then(|block_index| {
+                        let block = &data.blocks[block_index];
+                        block.runs.iter().any(|run| !run.text.is_empty()).then_some((index, block.id))
+                    })
+            });
+            if let Some((index, id)) = target {
+                self.tool_before_text_layer = Some(self.active_tool);
+                self.active_tool = Tool::Text;
+                canvas_state.active_layer_index = index;
+                self.last_tracked_layer_index = index;
+                self.last_tracked_layer_count = canvas_state.layers.len();
+                self.load_text_layer_block(canvas_state, Some(id), None);
+                return;
+            }
+        }
+
         match self.active_tool {
             Tool::Brush | Tool::Eraser | Tool::Pencil | Tool::Line => self.handle_stroke_tools_input(
                 ui,
@@ -642,4 +669,3 @@ include!("handle_input/selection_fill_input.rs");
 include!("handle_input/text_tool_input.rs");
 include!("handle_input/surface_transform_input.rs");
 include!("handle_input/utility_navigation_input.rs");
-

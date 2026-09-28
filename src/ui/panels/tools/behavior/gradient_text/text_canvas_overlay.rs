@@ -15,6 +15,19 @@ fn text_move_handle_canvas_pos(
 }
 
 impl ToolsPanel {
+    fn selected_text_controls_rect(&self, canvas_state: &CanvasState, canvas_rect: Rect, zoom: f32) -> Option<Rect> {
+        let (index, id) = self.text_state.selected_text_box?;
+        if index != canvas_state.active_layer_index { return None; }
+        let layer = canvas_state.layers.get(index)?;
+        let crate::canvas::LayerContent::Text(ref td) = layer.content else { return None; };
+        let block = td.blocks.iter().find(|block| block.id == id)?;
+        let layout = crate::ops::text_layer::compute_block_layout(block);
+        let bottom = block.position[1] + block.max_height.unwrap_or(layout.total_height).max(layout.total_height);
+        let x = canvas_rect.min.x + block.position[0] * zoom;
+        let y = canvas_rect.min.y + bottom * zoom + 10.0;
+        Some(Rect::from_min_size(egui::pos2(x, y), egui::vec2(110.0, 25.0)))
+    }
+
     pub fn update_gradient_if_dirty(
         &mut self,
         canvas_state: &mut CanvasState,
@@ -36,6 +49,24 @@ impl ToolsPanel {
         canvas_state: &mut CanvasState,
         primary_color_f32: [f32; 4],
     ) {
+        if self.text_state.confirm_selected_text_box {
+            self.text_state.confirm_selected_text_box = false;
+            if self.text_state.is_editing {
+                self.commit_text(canvas_state);
+            }
+        }
+        if self.text_state.reopen_selected_text_box {
+            self.text_state.reopen_selected_text_box = false;
+            if !self.text_state.is_editing
+                && let Some((index, id)) = self.text_state.selected_text_box
+                && canvas_state.layers.get(index).is_some_and(|layer| layer.is_text_layer())
+            {
+                canvas_state.active_layer_index = index;
+                self.last_tracked_layer_index = index;
+                self.last_tracked_layer_count = canvas_state.layers.len();
+                self.load_text_layer_block(canvas_state, Some(id), None);
+            }
+        }
         if !self.text_state.is_editing || self.text_state.text.is_empty() {
             return;
         }
@@ -418,6 +449,26 @@ impl ToolsPanel {
                     draw_dotted_rect(painter, r, halo, 3.0, 4.0, 3.0);
                     draw_dotted_rect(painter, r, light, 1.0, 4.0, 3.0);
                 }
+            }
+        }
+
+        // Controls remain below the selected box after editing is confirmed.
+        if let Some((index, id)) = self.text_state.selected_text_box
+            && let Some(controls) = self.selected_text_controls_rect(canvas_state, canvas_rect, zoom)
+        {
+            let edit = egui::Rect::from_min_size(controls.min, egui::vec2(52.0, 25.0));
+            let done = egui::Rect::from_min_size(controls.min + egui::vec2(58.0, 0.0), egui::vec2(52.0, 25.0));
+            for (rect, label) in [(edit, "编辑"), (done, "确定")] {
+                let hovered = rect.contains(ui.input(|input| input.pointer.hover_pos().unwrap_or_default()));
+                painter.rect_filled(rect, 4.0, if hovered { Color32::from_rgb(65, 92, 120) } else { Color32::from_rgb(44, 53, 64) });
+                painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, Color32::WHITE), egui::StrokeKind::Inside);
+                painter.text(rect.center(), egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(13.0), Color32::WHITE);
+            }
+            if ui.interact(edit, egui::Id::new(("text-box-edit", index, id)), egui::Sense::click()).clicked() {
+                self.text_state.reopen_selected_text_box = true;
+            }
+            if ui.interact(done, egui::Id::new(("text-box-done", index, id)), egui::Sense::click()).clicked() {
+                self.text_state.confirm_selected_text_box = true;
             }
         }
 

@@ -114,6 +114,45 @@ mod ime_regression_tests {
         assert_eq!(panel.text_state.cursor_pos, panel.text_state.text.len());
         assert!(!panel.text_state.ime_composing);
     }
+
+    #[test]
+    fn confirmed_text_box_can_be_reopened_and_reformatted() {
+        let mut panel = ToolsPanel::default();
+        panel.active_tool = Tool::Text;
+        let mut canvas = CanvasState::new(300, 150);
+        panel.create_editable_text_box(&mut canvas, [42.0, 30.0]);
+        let index = canvas.active_layer_index;
+        assert!(canvas.layers[index].is_text_layer());
+        let id = panel.text_state.active_block_id.unwrap();
+        panel.text_layer_insert_text(&mut canvas, "可编辑文字");
+        panel.commit_text(&mut canvas);
+        assert!(!panel.text_state.is_editing);
+        assert_eq!(panel.text_state.selected_text_box, Some((index, id)));
+        assert!(canvas.layers[index].is_text_layer());
+        panel.load_text_layer_block(&mut canvas, Some(id), None);
+        assert_eq!(panel.text_state.text, "可编辑文字");
+        panel.text_state.font_size = 48.0;
+        panel.commit_text(&mut canvas);
+        let crate::canvas::LayerContent::Text(ref data) = canvas.layers[index].content else { panic!("text box became pixels"); };
+        assert_eq!(data.blocks[0].flat_text(), "可编辑文字");
+        assert_eq!(data.blocks[0].runs[0].style.font_size, 48.0);
+    }
+
+    #[test]
+    fn new_text_layer_remains_in_edit_mode_on_next_frame() {
+        let ctx = egui::Context::default();
+        let mut panel = ToolsPanel::default();
+        panel.active_tool = Tool::Text;
+        let mut canvas = CanvasState::new(300, 150);
+        panel.create_editable_text_box(&mut canvas, [42.0, 30.0]);
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let rect = ui.max_rect();
+            panel.handle_input(ui, &mut canvas, None, None, None, None, &[], ui.painter(), rect, rect, 1.0,
+                [0.0, 0.0, 0.0, 1.0], [1.0; 4], None, false);
+        });
+        assert!(panel.text_state.is_editing);
+        assert!(panel.text_state.editing_text_layer);
+    }
 }
 
 impl ToolsPanel {
@@ -1442,12 +1481,45 @@ impl ToolsPanel {
             // Click to place origin (or commit existing + start new)
             // Only if not dragging the handle and not finishing a drag-to-select
             let any_popup_open = egui::Popup::is_any_open(ui.ctx());
+            let over_text_controls = self.selected_text_controls_rect(canvas_state, canvas_rect, zoom)
+                .is_some_and(|rect| ui.input(|input| input.pointer.interact_pos().is_some_and(|pos| rect.contains(pos))));
             if is_primary_clicked
                 && !self.text_state.dragging_handle
                 && !self.text_state.text_box_click_guard
                 && !self.text_state.text_select_dragging
                 && !any_popup_open
+                && !over_text_controls
             {
+                // Select an existing text box with one click and reopen it for
+                // editing with a double-click, including on another layer.
+                if let Some((x, y)) = canvas_pos_f32 {
+                    let existing = canvas_state.layers.iter().enumerate().rev().find_map(|(index, layer)| {
+                        if !layer.visible { return None; }
+                        let crate::canvas::LayerContent::Text(ref data) = layer.content else { return None; };
+                        crate::ops::text_layer::hit_test_blocks(data, x, y)
+                            .and_then(|block_index| {
+                                let block = &data.blocks[block_index];
+                                block.runs.iter().any(|run| !run.text.is_empty()).then_some((index, block.id))
+                            })
+                    });
+                    if let Some((index, id)) = existing
+                        && (index != canvas_state.active_layer_index
+                            || self.text_state.active_block_id != Some(id)
+                            || !self.text_state.is_editing)
+                    {
+                        if self.text_state.is_editing {
+                            self.commit_text(canvas_state);
+                        }
+                        canvas_state.active_layer_index = index;
+                        self.last_tracked_layer_index = index;
+                        self.last_tracked_layer_count = canvas_state.layers.len();
+                        self.text_state.selected_text_box = Some((index, id));
+                        if ui.input(|input| input.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                            self.load_text_layer_block(canvas_state, Some(id), None);
+                        }
+                        return;
+                    }
+                }
                 // Check if click is on the handle - if so, skip placement
                 let on_handle =
                     if let (Some(pos_f), Some(hp)) = (canvas_pos_unclamped, handle_canvas_pos) {
@@ -1603,7 +1675,7 @@ impl ToolsPanel {
                                 }
                                 // Skip the default click-to-place behavior
                             } else {
-                                // Commit raster text and start new
+                                // Finish the old box and open a new editable text box.
                                 self.stroke_tracker
                                     .start_preview_tool(canvas_state.active_layer_index, "Text");
                                 self.commit_text(canvas_state);
@@ -1612,22 +1684,10 @@ impl ToolsPanel {
                                 {
                                     self.pending_stroke_event = Some(evt);
                                 }
-                                self.text_state.origin = Some([pos_f.0, pos_f.1]);
-                                self.text_state.is_editing = true;
-                                self.text_state.editing_text_layer = false;
-                                self.text_state.editing_layer_index =
-                                    Some(canvas_state.active_layer_index);
-                                self.text_state.active_block_id = None;
-                                self.text_state.text.clear();
-                                self.clear_text_preview_cache(canvas_state);
-                                self.text_state.cursor_pos = 0;
-                                self.text_state.preview_dirty = true;
-                                self.restore_raster_style();
-                                self.stroke_tracker
-                                    .start_preview_tool(canvas_state.active_layer_index, "Text");
+                                self.create_editable_text_box(canvas_state, [pos_f.0, pos_f.1]);
                             }
                         } else {
-                            // Raster text mode: commit current text first
+                            // Finish the old box before creating the next one.
                             self.stroke_tracker
                                 .start_preview_tool(canvas_state.active_layer_index, "Text");
                             self.commit_text(canvas_state);
@@ -1636,19 +1696,7 @@ impl ToolsPanel {
                             {
                                 self.pending_stroke_event = Some(evt);
                             }
-                            self.text_state.origin = Some([pos_f.0, pos_f.1]);
-                            self.text_state.is_editing = true;
-                            self.text_state.editing_text_layer = false;
-                            self.text_state.editing_layer_index =
-                                Some(canvas_state.active_layer_index);
-                            self.text_state.active_block_id = None;
-                            self.text_state.text.clear();
-                            self.clear_text_preview_cache(canvas_state);
-                            self.text_state.cursor_pos = 0;
-                            self.text_state.preview_dirty = true;
-                            self.restore_raster_style();
-                            self.stroke_tracker
-                                .start_preview_tool(canvas_state.active_layer_index, "Text");
+                            self.create_editable_text_box(canvas_state, [pos_f.0, pos_f.1]);
                         }
                     } else if self.text_state.is_editing && self.text_state.text.is_empty() {
                         // Already editing but empty - for text layers, switch block
@@ -1665,9 +1713,7 @@ impl ToolsPanel {
                                 Some([pos_f.0, pos_f.1]),
                             );
                         } else {
-                            // Move the empty text origin
-                            self.text_state.origin = Some([pos_f.0, pos_f.1]);
-                            self.text_state.preview_dirty = true;
+                            self.create_editable_text_box(canvas_state, [pos_f.0, pos_f.1]);
                         }
                     } else {
                         // Check if active layer is a text layer
@@ -1684,20 +1730,7 @@ impl ToolsPanel {
                                 Some([pos_f.0, pos_f.1]),
                             );
                         } else {
-                            // Start new text at this position (raster stamp mode)
-                            self.text_state.origin = Some([pos_f.0, pos_f.1]);
-                            self.text_state.is_editing = true;
-                            self.text_state.editing_text_layer = false;
-                            self.text_state.editing_layer_index =
-                                Some(canvas_state.active_layer_index);
-                            self.text_state.active_block_id = None;
-                            self.text_state.text.clear();
-                            self.clear_text_preview_cache(canvas_state);
-                            self.text_state.cursor_pos = 0;
-                            self.text_state.preview_dirty = true;
-                            self.restore_raster_style();
-                            self.stroke_tracker
-                                .start_preview_tool(canvas_state.active_layer_index, "Text");
+                            self.create_editable_text_box(canvas_state, [pos_f.0, pos_f.1]);
                         }
                     }
                 }

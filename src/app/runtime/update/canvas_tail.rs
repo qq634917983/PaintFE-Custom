@@ -553,7 +553,7 @@ impl PaintFEApp {
 
         self.commit_pending_tool_history();
 
-        // --- Auto-rasterize text layers when destructive tools attempt to paint on them ---
+        // Painting beside editable text starts on a separate raster layer.
         if let Some(layer_idx) = self.tools_panel.pending_auto_rasterize.take() {
             let active_idx = self.active_project_index;
             if active_idx < self.projects.len()
@@ -562,27 +562,25 @@ impl PaintFEApp {
             {
                 {
                     let project = &mut self.projects[active_idx];
-                    // Snapshot before rasterization for undo
-                    let mut cmd =
-                        crate::components::history::SingleLayerSnapshotCommand::new_for_layer(
-                            "Rasterize Text Layer".to_string(),
-                            &project.canvas_state,
-                            layer_idx,
-                        );
-                    // Rasterize in place — convert Text→Raster, pixels are already up-to-date
-                    project.canvas_state.layers[layer_idx].content =
-                        crate::canvas::LayerContent::Raster;
-                    // Clear canvas-level text editing marker for this layer
-                    if project.canvas_state.text_editing_layer == Some(layer_idx) {
-                        project.canvas_state.text_editing_layer = None;
-                        project.canvas_state.clear_preview_state();
-                    }
-                    // Capture after state
+                    let mut cmd = crate::components::history::SnapshotCommand::new(
+                        "Add Paint Layer".to_string(), &project.canvas_state,
+                    );
+                    let source = &project.canvas_state.layers[layer_idx];
+                    let mut layer = crate::canvas::Layer::new(
+                        format!("Paint {}", project.canvas_state.layers.len() + 1),
+                        project.canvas_state.width,
+                        project.canvas_state.height,
+                        image::Rgba([0, 0, 0, 0]),
+                    );
+                    layer.folder_id = source.folder_id;
+                    let insert_idx = layer_idx + 1;
+                    project.canvas_state.layers.insert(insert_idx, layer);
+                    project.canvas_state.active_layer_index = insert_idx;
                     cmd.set_after(&project.canvas_state);
                     project.history.push(Box::new(cmd));
                     project.mark_dirty();
                 } // `project` borrow ends here — allows split-borrow below
-                // Cancel any stale text editing session (different field from projects)
+                // Close any stale text session after leaving its layer.
                 self.tools_panel
                     .cancel_text_editing(&mut self.projects[active_idx].canvas_state);
             }
